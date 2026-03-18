@@ -6,6 +6,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from gemini_extract import load_api_key, process_pdf_path
 from model_store import (
@@ -36,6 +37,14 @@ app = FastAPI(
     title="PDF model keys & answer booklets",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

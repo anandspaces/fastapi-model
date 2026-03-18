@@ -3,7 +3,7 @@ services:
     build: .
     image: modelanswer-key-api:latest
     ports:
-      - "8000:8000"
+      - "7037:8000"
     env_file:
       - .env
     environment:
