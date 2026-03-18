@@ -4,6 +4,7 @@ import re
 import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from gemini_extract import load_api_key, process_pdf_path
@@ -59,11 +60,11 @@ async def post_model_key(
     title: str = Form(...),
     lang: str = Form(...),
 ) -> JSONResponse:
-    log.info(f"Posting model key: {title}, {lang}, {request.headers.get("Authorization")}")
+    log.info(f"Posting model key: {title}, {lang}, {request.headers.get('Authorization')}")
     req_token = request.headers.get("Authorization")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv("API_TOKEN")}":
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
         return JSONResponse(_err("Invalid token."))
     title, lang = title.strip(), lang.strip()
     if not title or not lang:
@@ -89,7 +90,7 @@ async def post_answer_booklet(
     req_token = request.headers.get("Authorization")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv("API_TOKEN")}":
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
         return JSONResponse(_err("Invalid token."))
     id = id.strip()
     if not id:
@@ -138,7 +139,7 @@ async def get_model(request: Request, model_id: str) -> JSONResponse:
     req_token = request.headers.get("Authorization")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv("API_TOKEN")}":
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
         return JSONResponse(_err("Invalid token."))
     row = get_answer_model(model_id)
     if not row:
@@ -151,7 +152,7 @@ async def list_models(request: Request, page: int = 1, page_size: int = 20) -> J
     req_token = request.headers.get("Authorization")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv("API_TOKEN")}":
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
         return JSONResponse(_err("Invalid token."))
     items, total = list_answer_models_page(page, page_size)
     return JSONResponse(
@@ -164,7 +165,7 @@ async def delete_model(request: Request, model_id: str) -> JSONResponse:
     req_token = request.headers.get("Authorization")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv("API_TOKEN")}":
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
         return JSONResponse(_err("Invalid token."))
     deleted, pdf_path = delete_answer_model(model_id)
     if not deleted:
