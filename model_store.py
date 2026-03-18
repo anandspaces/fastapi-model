@@ -60,6 +60,21 @@ def insert_key_upload(key_id: str, title: str, lang: str, pdf_path: str) -> None
         db.commit()
 
 
+def get_key_upload(key_id: str) -> dict | None:
+    with _conn() as db:
+        row = db.execute(
+            "SELECT * FROM key_uploads WHERE id = ?", (key_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "lang": row["lang"],
+        "pdf_path": row["pdf_path"],
+    }
+
+
 def insert_answer_model(
     model_id: str,
     title: str,

@@ -12,6 +12,7 @@ from model_store import (
     UPLOADS_DIR,
     delete_answer_model,
     get_answer_model,
+    get_key_upload,
     init_db,
     insert_answer_model,
     insert_key_upload,
@@ -122,8 +123,19 @@ async def post_answer_booklet(
         dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
 
+    key_record = get_key_upload(id)
+    if not key_record:
+        dest.unlink(missing_ok=True)
+        return JSONResponse(_err(f"No key upload found for id {id!r}."))
+
     try:
-        insert_answer_model(id, questions, str(dest))
+        insert_answer_model(
+            id,
+            key_record["title"],
+            key_record["lang"],
+            questions,
+            str(dest),
+        )
     except Exception as e:
         log.exception("db insert failed")
         dest.unlink(missing_ok=True)
