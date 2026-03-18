@@ -2,6 +2,25 @@
 
 All API code lives under `pdf_json/api/`. The CLI script is [`read_pdf_to_json.py`](../read_pdf_to_json.py).
 
+## Environment
+
+Copy [`.env.example`](.env.example) to `.env` and set:
+
+| Variable | Purpose |
+|----------|---------|
+| `GEMINI_API_KEY` | Gemini API (PDF → questions) |
+| `API_TOKEN` | Bearer token for protected routes |
+
+## Docker
+
+Use a filled-in `.env` (see **Environment**), or `cp .env.example .env` and edit.
+
+```bash
+docker compose up --build
+```
+
+API: `http://localhost:8000` — SQLite and uploads persist in `./data` (mounted into the container).
+
 ## Run
 
 From **repository root** (with `GEMINI_API_KEY` set). Module path uses **dots** (`.`),
