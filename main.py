@@ -17,7 +17,7 @@ from model_store import (
     init_db,
     insert_answer_model,
     insert_key_upload,
-    list_answer_models_page,
+    list_registered_models,
 )
 from dotenv import load_dotenv
 
@@ -48,12 +48,12 @@ app.add_middleware(
 )
 
 
-def _ok(**fields: object) -> dict:
-    return {"data": {"status": 1, **fields}}
+def _ok(message: str, **fields: object) -> dict:
+    return {"status": 1, "message": message, "data": {**fields}}
 
 
 def _err(message: str, **extra: object) -> dict:
-    return {"data": {"status": 0, "message": message, **extra}}
+    return {"status": 0, "message": message, "data":{**extra}}
 
 
 def _is_pdf(filename: str | None, content_type: str | None) -> bool:
@@ -88,7 +88,7 @@ async def post_model_key(
         if dest.exists():
             dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
-    return JSONResponse(_ok(id=key_id, title=title, lang=lang))
+    return JSONResponse(_ok("Key uploaded successfully", id=key_id, title=title, lang=lang))
 
 
 @app.post("/models/answer-booklet")
@@ -151,13 +151,14 @@ async def post_answer_booklet(
         return JSONResponse(_err(str(e)))
 
     return JSONResponse(
-        _ok(id=id, questions=questions)
+        _ok("Answer booklet uploaded successfully", id=id, questions=questions)
     )
 
 
 @app.get("/models/{model_id}")
 async def get_model(request: Request, model_id: str) -> JSONResponse:
     req_token = request.headers.get("Authorization")
+    log.info(f"Getting model booklet: {req_token}")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
     if req_token != f"Bearer {os.getenv('API_TOKEN')}":
@@ -165,25 +166,25 @@ async def get_model(request: Request, model_id: str) -> JSONResponse:
     row = get_answer_model(model_id)
     if not row:
         return JSONResponse(_err("Model not found."))
-    return JSONResponse(_ok(**row))
+    return JSONResponse(_ok("Model found", **row))
 
 
 @app.get("/models")
-async def list_models(request: Request, page: int = 1, page_size: int = 20) -> JSONResponse:
+async def list_models(request: Request) -> JSONResponse:
     req_token = request.headers.get("Authorization")
+    log.info(f"Listing registered models: {req_token}")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
     if req_token != f"Bearer {os.getenv('API_TOKEN')}":
         return JSONResponse(_err("Invalid token."))
-    items, total = list_answer_models_page(page, page_size)
-    return JSONResponse(
-        _ok(items=items, page=page, page_size=page_size, total=total)
-    )
+    items = list_registered_models()
+    return JSONResponse(_ok("Models listed successfully", items=items))
 
 
 @app.delete("/models/{model_id}")
 async def delete_model(request: Request, model_id: str) -> JSONResponse:
     req_token = request.headers.get("Authorization")
+    log.info(f"Deleting model booklet: {req_token}")
     if not req_token:
         return JSONResponse(_err("Authorization header is required."))
     if req_token != f"Bearer {os.getenv('API_TOKEN')}":
@@ -193,4 +194,4 @@ async def delete_model(request: Request, model_id: str) -> JSONResponse:
         return JSONResponse(_err("Model not found."))
     if pdf_path:
         Path(pdf_path).unlink(missing_ok=True)
-    return JSONResponse(_ok())
+    return JSONResponse(_ok("Model deleted successfully"))

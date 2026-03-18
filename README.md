@@ -52,7 +52,7 @@ Data: `pdf_json/api/data/` (DB + uploads).
 
 - `POST /models/key` — multipart: `title`, `lang`, `file` (PDF)
 - `POST /models/answer-booklet` — multipart: `title`, `lang`, `file` (PDF)
-- `GET /models` — query: `page`, `page_size`
+- `GET /models` — every key-registered id: `{ id, title, lang, has_booklet }[]` (newest first; `has_booklet` false until answer booklet is posted)
 - `GET /models/{model_id}`
 - `DELETE /models/{model_id}`
 

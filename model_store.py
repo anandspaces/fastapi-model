@@ -113,22 +113,31 @@ def get_answer_model(model_id: str) -> dict | None:
     }
 
 
-def list_answer_models_page(page: int, page_size: int) -> tuple[list[dict], int]:
-    page = max(1, page)
-    page_size = min(max(1, page_size), 100)
-    offset = (page - 1) * page_size
+def list_registered_models() -> list[dict]:
+    """Every id from POST /models/key (key_uploads), with title/lang.
+
+    Includes rows before answer booklet is posted. ``has_booklet`` is True once
+    that id exists in answer_models.
+    """
     with _conn() as db:
-        total = db.execute("SELECT COUNT(*) FROM answer_models").fetchone()[0]
         rows = db.execute(
-            """SELECT id, title, lang, question_count FROM answer_models
-               ORDER BY created_at DESC LIMIT ? OFFSET ?""",
-            (page_size, offset),
+            """
+            SELECT k.id, k.title, k.lang,
+                   CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS has_booklet
+            FROM key_uploads k
+            LEFT JOIN answer_models a ON a.id = k.id
+            ORDER BY k.created_at DESC
+            """
         ).fetchall()
-    items = [
-        {"id": r["id"], "title": r["title"], "lang": r["lang"], "question_count": r["question_count"]}
+    return [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "lang": r["lang"],
+            "has_booklet": bool(r["has_booklet"]),
+        }
         for r in rows
     ]
-    return items, total
 
 
 def delete_answer_model(model_id: str) -> tuple[bool, str | None]:
