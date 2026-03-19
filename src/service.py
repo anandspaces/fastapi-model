@@ -3,7 +3,7 @@
 import json
 import time
 
-from database import UPLOADS_DIR, get_conn
+from src.database import UPLOADS_DIR, get_conn
 
 
 def insert_key_upload(key_id: str, title: str, lang: str, pdf_path: str) -> None:

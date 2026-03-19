@@ -9,9 +9,9 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from gemini_extract import load_api_key, process_pdf_path
-from database import UPLOADS_DIR, init_db
-from service import (
+from src.gemini_extract import load_api_key, process_pdf_path
+from src.database import UPLOADS_DIR, init_db
+from src.service import (
     delete_model_key,
     delete_answer_model,
     get_answer_model,
@@ -23,7 +23,7 @@ from service import (
     update_answer_model_question,
 )
 from dotenv import load_dotenv
-from schemas import QuestionPayload
+from src.schemas import QuestionPayload
 
 
 class ModelKeyPayload(BaseModel):
