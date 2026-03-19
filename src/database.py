@@ -3,7 +3,8 @@
 import sqlite3
 from pathlib import Path
 
-DATA_ROOT = Path(__file__).resolve().parent / "data"
+# Keep DB under project root data/ so docker volume ./data:/app/data works.
+DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DATA_ROOT / "models.db"
 UPLOADS_DIR = DATA_ROOT / "uploads"
 
