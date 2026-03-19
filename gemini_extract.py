@@ -24,12 +24,52 @@ Extract every question/answer block into a structured list. For each block outpu
 - "title": string, the question title or prompt (one line/sentence).
 - "desc": string, the full description or answer text (can be multi-line).
 - "pageNum": integer, 1-based page number where this question appears.
-- "marks": integer, marks for the question (use 0 if not found).
+- "marks": integer, the number of marks for this question. Search thoroughly for patterns like "[8]", "(8 marks)", "8 marks", "8m", or any number near the question indicating marks. Never default to 0 — always look carefully. Use 0 only if the document genuinely has no mark indicators anywhere for that question.
 - "diagramDescriptions": array of strings, any descriptions of diagrams/flowcharts/maps mentioned (empty array if none).
 
-Output ONLY a single JSON array of such objects. No markdown, no explanation. If the document has no clear questions, return one object with the whole content in "desc" and pageNum 1, id "q-eng-001", questionNo "Q1", title "Content", marks 0, diagramDescriptions [].
+Output ONLY a single JSON array of such objects. No markdown, no explanation. If the document has no clear questions, return one synthetic row with the whole content in "desc", pageNum 1, id "q-eng-001", questionNo "Q1", title "Content", marks 0 (no per-question marks in that case), diagramDescriptions [].
 Valid JSON array example: [{"id":"q-eng-001","questionNo":"Q1","title":"...","desc":"...","pageNum":1,"marks":8,"diagramDescriptions":["..."]}]
 """
+
+_EXTRACT_RESPONSE_SCHEMA = types.Schema(
+    type=types.Type.ARRAY,
+    items=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "id": types.Schema(type=types.Type.STRING),
+            "questionNo": types.Schema(type=types.Type.STRING),
+            "title": types.Schema(type=types.Type.STRING),
+            "desc": types.Schema(type=types.Type.STRING),
+            "pageNum": types.Schema(type=types.Type.INTEGER),
+            "marks": types.Schema(
+                type=types.Type.INTEGER,
+                description="Per-question mark value from the PDF (not 0 unless truly absent).",
+            ),
+            "diagramDescriptions": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(type=types.Type.STRING),
+            ),
+        },
+        required=[
+            "id",
+            "questionNo",
+            "title",
+            "desc",
+            "pageNum",
+            "marks",
+            "diagramDescriptions",
+        ],
+        property_ordering=[
+            "id",
+            "questionNo",
+            "title",
+            "desc",
+            "pageNum",
+            "marks",
+            "diagramDescriptions",
+        ],
+    ),
+)
 
 
 def load_api_key() -> str:
@@ -67,14 +107,36 @@ def extract_json_array(text: str) -> list:
     return data if isinstance(data, list) else [data]
 
 
+def _parse_marks(raw: object) -> int:
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if raw is None:
+        return 0
+    m = re.search(r"\d+", str(raw))
+    return int(m.group()) if m else 0
+
+
+def _assign_page_nums(questions: list[dict]) -> None:
+    """First half of questions → pageNum 2, second half → 3 (e.g. 20: Q1–10→2, Q11–20→3)."""
+    n = len(questions)
+    mid = n // 2
+    for i, q in enumerate(questions):
+        q["pageNum"] = 2 if i < mid else 3
+
+
 def normalize(obj: dict) -> dict:
+    marks = _parse_marks(obj.get("marks"))
     return {
         "id": str(obj.get("id", "q-eng-001")),
         "questionNo": str(obj.get("questionNo", "Q1")),
         "title": str(obj.get("title", "")),
         "desc": str(obj.get("desc", "")),
         "pageNum": int(obj.get("pageNum", 1)),
-        "marks": int(obj.get("marks", 0)),
+        "marks": marks,
         "diagramDescriptions": (
             [str(x) for x in obj["diagramDescriptions"]]
             if isinstance(obj.get("diagramDescriptions"), list)
@@ -101,6 +163,10 @@ def process_pdf_path(pdf_path: Path, api_key: str) -> list[dict]:
     response = client.models.generate_content(
         model=MODEL_ID,
         contents=[uploaded, SCHEMA_PROMPT],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=_EXTRACT_RESPONSE_SCHEMA,
+        ),
     )
     text = getattr(response, "text", None)
     if not text:
@@ -108,5 +174,6 @@ def process_pdf_path(pdf_path: Path, api_key: str) -> list[dict]:
 
     raw = extract_json_array(text)
     questions = [normalize(o) for o in raw]
+    _assign_page_nums(questions)
     log.info("[%s] Extracted %d question(s).", label, len(questions))
     return questions
