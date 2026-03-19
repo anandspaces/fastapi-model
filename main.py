@@ -149,7 +149,19 @@ async def auth_signup(payload: AuthRequest) -> JSONResponse:
     ok, reason = create_user(username, _hash_password(password))
     if not ok:
         return JSONResponse(_err(reason or "Signup failed."))
-    return JSONResponse(_ok("Signup successful.", username=username))
+    try:
+        token = _create_access_token(username)
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    return JSONResponse(
+        _ok(
+            "Signup successful.",
+            accessToken=token.accessToken,
+            tokenType=token.tokenType,
+            expiresIn=token.expiresIn,
+            username=username,
+        )
+    )
 
 
 @app.post("/auth/login")
