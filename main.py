@@ -17,6 +17,7 @@ from src.gemini_extract import load_api_key, process_pdf_path
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
     create_user,
+    delete_answer_model_question,
     delete_model_key,
     delete_answer_model,
     get_answer_model,
@@ -385,6 +386,29 @@ async def put_model_question(
         return JSONResponse(_err(reason or "Update failed"))
 
     return JSONResponse(_ok("Question updated successfully", id=model_id, question_id=question_id))
+
+
+@app.delete("/models/{model_id}/questions/{question_id}")
+async def delete_model_question(
+    request: Request, model_id: str, question_id: str
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+
+    ok, reason, questions = delete_answer_model_question(model_id, question_id, user["id"])
+    if not ok:
+        return JSONResponse(_err(reason or "Delete failed."))
+
+    return JSONResponse(
+        _ok(
+            "Question deleted successfully",
+            id=model_id,
+            question_id=question_id,
+            question_count=len(questions or []),
+            questions=questions or [],
+        )
+    )
 
 
 @app.delete("/models/{model_id}")

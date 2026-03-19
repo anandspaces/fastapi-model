@@ -61,6 +61,7 @@ Data: `pdf_json/api/data/` (DB + uploads).
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet }[]` (newest first; `has_booklet` false until answer booklet is posted)
 - `GET /models/{model_id}`
 - `PUT /models/{model_id}/questions/{question_id}` — replace one question object (match by `question.id`)
+- `DELETE /models/{model_id}/questions/{question_id}` — delete one question by `question.id` and renumber remaining `questionNo`
 - `PUT /models/{model_id}/questions/reorder` — reorder questions by id and renumber `questionNo` as `Q1..Qn`
 - `DELETE /models/{model_id}`
 

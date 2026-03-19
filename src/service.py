@@ -271,6 +271,47 @@ def reorder_answer_model_questions(
     return True, None, arranged
 
 
+def delete_answer_model_question(
+    model_id: str, question_id: str, owner_user_id: str
+) -> tuple[bool, str | None, list[dict] | None]:
+    with get_conn() as db:
+        row = db.execute(
+            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
+        ).fetchone()
+        if not row:
+            return False, "Model not found.", None
+
+        try:
+            questions = json.loads(row["questions_json"])
+        except Exception:
+            return False, "Invalid questions_json.", None
+
+        if not isinstance(questions, list):
+            return False, "Invalid questions_json.", None
+
+        idx = None
+        for i, q in enumerate(questions):
+            if isinstance(q, dict) and q.get("id") == question_id:
+                idx = i
+                break
+
+        if idx is None:
+            return False, "Question not found.", None
+
+        questions.pop(idx)
+        for i, q in enumerate(questions, 1):
+            q["questionNo"] = f"Q{i}"
+
+        qjson = json.dumps(questions, ensure_ascii=False)
+        db.execute(
+            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
+            (qjson, len(questions), model_id, owner_user_id),
+        )
+        db.commit()
+    return True, None, questions
+
+
 def create_user(username: str, password_hash: str) -> tuple[bool, str | None]:
     user_id = str(uuid.uuid4())
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
