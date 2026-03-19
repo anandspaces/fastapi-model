@@ -2,6 +2,7 @@
 
 import json
 import time
+import uuid
 
 from src.database import UPLOADS_DIR, get_conn
 
@@ -191,3 +192,36 @@ def update_answer_model_question(
         )
         db.commit()
     return True, None
+
+
+def create_user(username: str, password_hash: str) -> tuple[bool, str | None]:
+    user_id = str(uuid.uuid4())
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with get_conn() as db:
+        existing = db.execute(
+            "SELECT 1 FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if existing:
+            return False, "Username already exists"
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, created_at) VALUES (?,?,?,?)",
+            (user_id, username, password_hash, created),
+        )
+        db.commit()
+    return True, None
+
+
+def get_user_by_username(username: str) -> dict | None:
+    with get_conn() as db:
+        row = db.execute(
+            "SELECT id, username, password_hash, created_at FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "password_hash": row["password_hash"],
+        "created_at": row["created_at"],
+    }

@@ -9,7 +9,8 @@ Copy [`.env.example`](.env.example) to `.env` and set:
 | Variable | Purpose |
 |----------|---------|
 | `GEMINI_API_KEY` | Gemini API (PDF → questions) |
-| `API_TOKEN` | Bearer token for protected routes |
+| `JWT_SECRET` | Secret used to sign JWT access tokens |
+| `JWT_EXPIRES_MINUTES` | JWT lifetime in minutes (default `60`) |
 
 ## Docker
 
@@ -51,6 +52,8 @@ Data: `pdf_json/api/data/` (DB + uploads).
 
 ## Endpoints
 
+- `POST /auth/signup` — JSON: `username`, `password`
+- `POST /auth/login` — JSON: `username`, `password` -> token data (`accessToken`, `tokenType`, `expiresIn`)
 - `POST /models/key` — multipart: `title`, `lang`, `file` (PDF)
 - `PUT /models/key/{key_id}` — update model key metadata (`title`, `lang`)
 - `DELETE /models/key/{key_id}` — delete model key (and linked answer model if present)
@@ -61,3 +64,7 @@ Data: `pdf_json/api/data/` (DB + uploads).
 - `DELETE /models/{model_id}`
 
 Responses: `{ "data": { "status": 1 \| 0, ... } }`.
+
+All `/models*` and `/models/key*` endpoints require:
+
+`Authorization: Bearer <accessToken>`

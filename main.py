@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import re
 import os
@@ -9,13 +10,18 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import jwt
+from jwt.exceptions import InvalidTokenError
+from passlib.context import CryptContext
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
+    create_user,
     delete_model_key,
     delete_answer_model,
     get_answer_model,
     get_key_upload,
+    get_user_by_username,
     insert_answer_model,
     insert_key_upload,
     list_registered_models,
@@ -23,7 +29,7 @@ from src.service import (
     update_answer_model_question,
 )
 from dotenv import load_dotenv
-from src.schemas import QuestionPayload
+from src.schemas import AuthRequest, QuestionPayload, TokenData
 
 
 class ModelKeyPayload(BaseModel):
@@ -34,6 +40,10 @@ class ModelKeyPayload(BaseModel):
 load_dotenv()
 
 log = logging.getLogger(__name__)
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+JWT_ALGORITHM = "HS256"
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
+JWT_EXPIRES_MINUTES = int(os.getenv("JWT_EXPIRES_MINUTES", "60"))
 
 
 @asynccontextmanager
@@ -74,9 +84,98 @@ def _is_pdf(filename: str | None, content_type: str | None) -> bool:
     return False
 
 
+def _hash_password(password: str) -> str:
+    return pwd_ctx.hash(password)
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    return pwd_ctx.verify(password, password_hash)
+
+
+def _create_access_token(username: str) -> TokenData:
+    if not JWT_SECRET:
+        raise ValueError("JWT_SECRET is not configured.")
+    expires_delta = timedelta(minutes=JWT_EXPIRES_MINUTES)
+    exp = datetime.now(timezone.utc) + expires_delta
+    token = jwt.encode(
+        {"sub": username, "exp": exp},
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+    return TokenData(accessToken=token, expiresIn=int(expires_delta.total_seconds()))
+
+
+def _unauthorized(message: str = "Unauthorized.") -> JSONResponse:
+    return JSONResponse(_err(message))
+
+
+def _require_auth_username(request: Request) -> tuple[str | None, JSONResponse | None]:
+    auth = request.headers.get("Authorization", "").strip()
+    if not auth:
+        return None, _unauthorized("Authorization header is required.")
+    if not auth.lower().startswith("bearer "):
+        return None, _unauthorized("Authorization header must be Bearer token.")
+    token = auth[7:].strip()
+    if not token:
+        return None, _unauthorized("Bearer token is required.")
+    if not JWT_SECRET:
+        return None, _unauthorized("JWT_SECRET is not configured.")
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except InvalidTokenError:
+        return None, _unauthorized("Invalid or expired token.")
+
+    username = str(payload.get("sub", "")).strip()
+    if not username:
+        return None, _unauthorized("Invalid token payload.")
+    return username, None
+
+
 @app.get("/")
 async def get_root() -> JSONResponse:
     return JSONResponse("API is running successfully!")
+
+
+@app.post("/auth/signup")
+async def auth_signup(payload: AuthRequest) -> JSONResponse:
+    username = payload.username.strip()
+    password = payload.password
+    if not username or not password:
+        return JSONResponse(_err("username and password are required."))
+    if len(password) < 6:
+        return JSONResponse(_err("password must be at least 6 characters."))
+
+    ok, reason = create_user(username, _hash_password(password))
+    if not ok:
+        return JSONResponse(_err(reason or "Signup failed."))
+    return JSONResponse(_ok("Signup successful.", username=username))
+
+
+@app.post("/auth/login")
+async def auth_login(payload: AuthRequest) -> JSONResponse:
+    username = payload.username.strip()
+    password = payload.password
+    if not username or not password:
+        return JSONResponse(_err("username and password are required."))
+
+    user = get_user_by_username(username)
+    if not user or not _verify_password(password, user["password_hash"]):
+        return JSONResponse(_err("Invalid username or password."))
+
+    try:
+        token = _create_access_token(username)
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    return JSONResponse(
+        _ok(
+            "Login successful.",
+            accessToken=token.accessToken,
+            tokenType=token.tokenType,
+            expiresIn=token.expiresIn,
+            username=username,
+        )
+    )
 
 @app.post("/models/key")
 async def post_model_key(
@@ -84,12 +183,9 @@ async def post_model_key(
     title: str = Form(...),
     lang: str = Form(...),
 ) -> JSONResponse:
-    log.info(f"Posting model key: {title}, {lang}, {request.headers.get('Authorization')}")
-    req_token = request.headers.get("Authorization")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
     title, lang = title.strip(), lang.strip()
     if not title or not lang:
         return JSONResponse(_err("title and lang are required (non-empty)."))
@@ -109,12 +205,9 @@ async def post_model_key(
 async def put_model_key(
     request: Request, key_id: str, payload: ModelKeyPayload
 ) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    log.info(f"Updating model key: {key_id}, {req_token}")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
 
     title, lang = payload.title.strip(), payload.lang.strip()
 
@@ -130,12 +223,9 @@ async def put_model_key(
 
 @app.delete("/models/key/{key_id}")
 async def delete_key(request: Request, key_id: str) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    log.info(f"Deleting model key: {key_id}, {req_token}")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
 
     deleted, key_pdf_path, booklet_pdf_path = delete_model_key(key_id)
     if not deleted:
@@ -156,11 +246,9 @@ async def post_answer_booklet(
     id: str = Form(...),
     file: UploadFile = File(...),
 ) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
     id = id.strip()
     if not id:
         return JSONResponse(_err("id is required (non-empty)."))
@@ -216,12 +304,9 @@ async def post_answer_booklet(
 
 @app.get("/models/{model_id}")
 async def get_model(request: Request, model_id: str) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    log.info(f"Getting model booklet: {req_token}")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
     row = get_answer_model(model_id)
     if not row:
         return JSONResponse(_err("Model not found."))
@@ -230,12 +315,9 @@ async def get_model(request: Request, model_id: str) -> JSONResponse:
 
 @app.get("/models")
 async def list_models(request: Request) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    log.info(f"Listing registered models: {req_token}")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
     items = list_registered_models()
     return JSONResponse(_ok("Models listed successfully", items=items))
 
@@ -244,11 +326,9 @@ async def list_models(request: Request) -> JSONResponse:
 async def put_model_question(
     request: Request, model_id: str, question_id: str, payload: QuestionPayload
 ) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
 
     ok, reason = update_answer_model_question(
         model_id, question_id, {"id": question_id, **payload.model_dump()}
@@ -263,12 +343,9 @@ async def put_model_question(
 
 @app.delete("/models/{model_id}")
 async def delete_model(request: Request, model_id: str) -> JSONResponse:
-    req_token = request.headers.get("Authorization")
-    log.info(f"Deleting model booklet: {req_token}")
-    if not req_token:
-        return JSONResponse(_err("Authorization header is required."))
-    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
-        return JSONResponse(_err("Invalid token."))
+    _, auth_err = _require_auth_username(request)
+    if auth_err:
+        return auth_err
     deleted, pdf_path = delete_answer_model(model_id)
     if not deleted:
         return JSONResponse(_err("Model not found."))
