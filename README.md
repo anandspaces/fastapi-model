@@ -54,6 +54,7 @@ Data: `pdf_json/api/data/` (DB + uploads).
 - `POST /models/answer-booklet` — multipart: `title`, `lang`, `file` (PDF)
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet }[]` (newest first; `has_booklet` false until answer booklet is posted)
 - `GET /models/{model_id}`
+- `PUT /models/{model_id}/questions/{question_id}` — replace one question object (match by `question.id`)
 - `DELETE /models/{model_id}`
 
 Responses: `{ "data": { "status": 1 \| 0, ... } }`.

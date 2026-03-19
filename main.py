@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from gemini_extract import load_api_key, process_pdf_path
 from model_store import (
     UPLOADS_DIR,
@@ -18,6 +19,7 @@ from model_store import (
     insert_answer_model,
     insert_key_upload,
     list_registered_models,
+    update_answer_model_question,
 )
 from dotenv import load_dotenv
 
@@ -62,6 +64,15 @@ def _is_pdf(filename: str | None, content_type: str | None) -> bool:
     if content_type and "pdf" in content_type.lower():
         return True
     return False
+
+
+class QuestionPayload(BaseModel):
+    questionNo: str
+    title: str
+    desc: str
+    pageNum: int = Field(ge=1)
+    marks: int = Field(ge=0)
+    diagramDescriptions: list[str]
 
 
 @app.post("/models/key")
@@ -179,6 +190,27 @@ async def list_models(request: Request) -> JSONResponse:
         return JSONResponse(_err("Invalid token."))
     items = list_registered_models()
     return JSONResponse(_ok("Models listed successfully", items=items))
+
+
+@app.put("/models/{model_id}/questions/{question_id}")
+async def put_model_question(
+    request: Request, model_id: str, question_id: str, payload: QuestionPayload
+) -> JSONResponse:
+    req_token = request.headers.get("Authorization")
+    if not req_token:
+        return JSONResponse(_err("Authorization header is required."))
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
+        return JSONResponse(_err("Invalid token."))
+
+    ok, reason = update_answer_model_question(
+        model_id, question_id, {"id": question_id, **payload.model_dump()}
+    )
+    if not ok:
+        if reason in ("Model not found", "Question not found"):
+            return JSONResponse(_err(reason))
+        return JSONResponse(_err(reason or "Update failed"))
+
+    return JSONResponse(_ok("Question updated successfully", id=model_id, question_id=question_id))
 
 
 @app.delete("/models/{model_id}")

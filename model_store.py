@@ -151,3 +151,43 @@ def delete_answer_model(model_id: str) -> tuple[bool, str | None]:
         db.execute("DELETE FROM answer_models WHERE id = ?", (model_id,))
         db.commit()
     return True, path
+
+
+def update_answer_model_question(
+    model_id: str, question_id: str, new_question: dict
+) -> tuple[bool, str | None]:
+    with _conn() as db:
+        row = db.execute(
+            "SELECT questions_json FROM answer_models WHERE id = ?", (model_id,)
+        ).fetchone()
+        if not row:
+            return False, "Model not found"
+
+        try:
+            questions = json.loads(row["questions_json"])
+        except Exception:
+            return False, "Invalid questions_json"
+
+        if not isinstance(questions, list):
+            return False, "Invalid questions_json"
+
+        idx = None
+        for i, q in enumerate(questions):
+            if isinstance(q, dict) and q.get("id") == question_id:
+                idx = i
+                break
+
+        if idx is None:
+            return False, "Question not found"
+
+        new_obj = dict(new_question)
+        new_obj["id"] = question_id
+        questions[idx] = new_obj
+
+        qjson = json.dumps(questions, ensure_ascii=False)
+        db.execute(
+            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ?",
+            (qjson, len(questions), model_id),
+        )
+        db.commit()
+    return True, None
