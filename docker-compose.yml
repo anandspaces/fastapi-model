@@ -6,9 +6,6 @@ services:
       - "7037:8000"
     env_file:
       - .env
-    environment:
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      API_TOKEN: ${API_TOKEN:-}
     volumes:
       # SQLite DB + PDF uploads (same paths as model_store / gemini_extract)
       - ./data:/app/data

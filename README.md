@@ -43,7 +43,8 @@ uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | File | Role |
 |------|------|
 | `main.py` | FastAPI app & routes (entrypoint) |
-| `model_store.py` | SQLite (`key_uploads`, `answer_models`) |
+| `database.py` | DB path constants, SQLite connection helper, and schema init |
+| `service.py` | All helper methods for key/booklet CRUD |
 | `gemini_extract.py` | Gemini PDF → questions JSON |
 
 Data: `pdf_json/api/data/` (DB + uploads).
@@ -51,6 +52,8 @@ Data: `pdf_json/api/data/` (DB + uploads).
 ## Endpoints
 
 - `POST /models/key` — multipart: `title`, `lang`, `file` (PDF)
+- `PUT /models/key/{key_id}` — update model key metadata (`title`, `lang`)
+- `DELETE /models/key/{key_id}` — delete model key (and linked answer model if present)
 - `POST /models/answer-booklet` — multipart: `title`, `lang`, `file` (PDF)
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet }[]` (newest first; `has_booklet` false until answer booklet is posted)
 - `GET /models/{model_id}`

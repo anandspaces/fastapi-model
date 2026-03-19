@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY main.py model_store.py gemini_extract.py ./
+COPY main.py gemini_extract.py schemas.py service.py database.py ./
 
 EXPOSE 8000
 

@@ -1,58 +1,14 @@
-"""
-SQLite persistence for the API (pdf_json/api/data/).
-
-Tables:
-  - key_uploads: uploaded model-key PDFs (multipart POST /models/key)
-  - answer_models: extracted answer booklets (POST /models/answer-booklet)
-"""
+"""SQLite persistence service for model keys and answer booklets."""
 
 import json
-import sqlite3
 import time
-from pathlib import Path
 
-_DATA_ROOT = Path(__file__).resolve().parent / "data"
-DB_PATH = _DATA_ROOT / "models.db"
-UPLOADS_DIR = _DATA_ROOT / "uploads"
-
-
-def _conn() -> sqlite3.Connection:
-    _DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
-
-
-def init_db() -> None:
-    """Create key_uploads and answer_models if missing."""
-    with _conn() as db:
-        db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS key_uploads (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                lang TEXT NOT NULL,
-                pdf_path TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS answer_models (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                lang TEXT NOT NULL,
-                questions_json TEXT NOT NULL,
-                question_count INTEGER NOT NULL,
-                booklet_pdf_path TEXT,
-                created_at TEXT NOT NULL
-            );
-            """
-        )
-        db.commit()
+from database import UPLOADS_DIR, get_conn
 
 
 def insert_key_upload(key_id: str, title: str, lang: str, pdf_path: str) -> None:
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with _conn() as db:
+    with get_conn() as db:
         db.execute(
             "INSERT INTO key_uploads (id, title, lang, pdf_path, created_at) VALUES (?,?,?,?,?)",
             (key_id, title, lang, pdf_path, created),
@@ -61,7 +17,7 @@ def insert_key_upload(key_id: str, title: str, lang: str, pdf_path: str) -> None
 
 
 def get_key_upload(key_id: str) -> dict | None:
-    with _conn() as db:
+    with get_conn() as db:
         row = db.execute(
             "SELECT * FROM key_uploads WHERE id = ?", (key_id,)
         ).fetchone()
@@ -75,6 +31,50 @@ def get_key_upload(key_id: str) -> dict | None:
     }
 
 
+def update_key_upload(key_id: str, title: str, lang: str) -> tuple[bool, str | None]:
+    """Update title/lang in key_uploads and linked answer_models row (same id) if present."""
+    with get_conn() as db:
+        existing = db.execute(
+            "SELECT 1 FROM key_uploads WHERE id = ?", (key_id,)
+        ).fetchone()
+        if not existing:
+            return False, "Model key not found"
+
+        db.execute(
+            "UPDATE key_uploads SET title = ?, lang = ? WHERE id = ?",
+            (title, lang, key_id),
+        )
+        db.execute(
+            "UPDATE answer_models SET title = ?, lang = ? WHERE id = ?",
+            (title, lang, key_id),
+        )
+        db.commit()
+    return True, None
+
+
+def delete_model_key(key_id: str) -> tuple[bool, str | None, str | None]:
+    """Delete key_upload and linked answer_model row by id.
+
+    Returns (deleted, key_pdf_path, booklet_pdf_path).
+    """
+    with get_conn() as db:
+        key_row = db.execute(
+            "SELECT pdf_path FROM key_uploads WHERE id = ?", (key_id,)
+        ).fetchone()
+        if not key_row:
+            return False, None, None
+
+        answer_row = db.execute(
+            "SELECT booklet_pdf_path FROM answer_models WHERE id = ?", (key_id,)
+        ).fetchone()
+        booklet_path = answer_row["booklet_pdf_path"] if answer_row else None
+
+        db.execute("DELETE FROM key_uploads WHERE id = ?", (key_id,))
+        db.execute("DELETE FROM answer_models WHERE id = ?", (key_id,))
+        db.commit()
+    return True, key_row["pdf_path"], booklet_path
+
+
 def insert_answer_model(
     model_id: str,
     title: str,
@@ -85,7 +85,7 @@ def insert_answer_model(
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     qjson = json.dumps(questions, ensure_ascii=False)
     n = len(questions)
-    with _conn() as db:
+    with get_conn() as db:
         db.execute(
             """INSERT INTO answer_models
             (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at)
@@ -96,7 +96,7 @@ def insert_answer_model(
 
 
 def get_answer_model(model_id: str) -> dict | None:
-    with _conn() as db:
+    with get_conn() as db:
         row = db.execute(
             "SELECT * FROM answer_models WHERE id = ?", (model_id,)
         ).fetchone()
@@ -119,7 +119,7 @@ def list_registered_models() -> list[dict]:
     Includes rows before answer booklet is posted. ``has_booklet`` is True once
     that id exists in answer_models.
     """
-    with _conn() as db:
+    with get_conn() as db:
         rows = db.execute(
             """
             SELECT k.id, k.title, k.lang,
@@ -141,7 +141,7 @@ def list_registered_models() -> list[dict]:
 
 
 def delete_answer_model(model_id: str) -> tuple[bool, str | None]:
-    with _conn() as db:
+    with get_conn() as db:
         row = db.execute(
             "SELECT booklet_pdf_path FROM answer_models WHERE id = ?", (model_id,)
         ).fetchone()
@@ -156,7 +156,7 @@ def delete_answer_model(model_id: str) -> tuple[bool, str | None]:
 def update_answer_model_question(
     model_id: str, question_id: str, new_question: dict
 ) -> tuple[bool, str | None]:
-    with _conn() as db:
+    with get_conn() as db:
         row = db.execute(
             "SELECT questions_json FROM answer_models WHERE id = ?", (model_id,)
         ).fetchone()

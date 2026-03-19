@@ -8,20 +8,28 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from gemini_extract import load_api_key, process_pdf_path
-from model_store import (
-    UPLOADS_DIR,
+from database import UPLOADS_DIR, init_db
+from service import (
+    delete_model_key,
     delete_answer_model,
     get_answer_model,
     get_key_upload,
-    init_db,
     insert_answer_model,
     insert_key_upload,
     list_registered_models,
+    update_key_upload,
     update_answer_model_question,
 )
 from dotenv import load_dotenv
+from schemas import QuestionPayload
+
+
+class ModelKeyPayload(BaseModel):
+    title: str
+    lang: str
+
 
 load_dotenv()
 
@@ -66,14 +74,9 @@ def _is_pdf(filename: str | None, content_type: str | None) -> bool:
     return False
 
 
-class QuestionPayload(BaseModel):
-    questionNo: str
-    title: str
-    desc: str
-    pageNum: int = Field(ge=1)
-    marks: int = Field(ge=0)
-    diagramDescriptions: list[str]
-
+@app.get("/")
+async def get_root() -> JSONResponse:
+    return JSONResponse("API is running successfully!")
 
 @app.post("/models/key")
 async def post_model_key(
@@ -100,6 +103,51 @@ async def post_model_key(
             dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
     return JSONResponse(_ok("Key uploaded successfully", id=key_id, title=title, lang=lang))
+
+
+@app.put("/models/key/{key_id}")
+async def put_model_key(
+    request: Request, key_id: str, payload: ModelKeyPayload
+) -> JSONResponse:
+    req_token = request.headers.get("Authorization")
+    log.info(f"Updating model key: {key_id}, {req_token}")
+    if not req_token:
+        return JSONResponse(_err("Authorization header is required."))
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
+        return JSONResponse(_err("Invalid token."))
+
+    title, lang = payload.title.strip(), payload.lang.strip()
+
+    if not title or not lang:
+        return JSONResponse(_err("title and lang are required (non-empty)."))
+
+    ok, reason = update_key_upload(key_id, title, lang)
+    log.info(f"Updated model key: {ok}, {reason}")
+    if not ok:
+        return JSONResponse(_err(reason or "Model key not found."))
+    return JSONResponse(_ok("Model key updated successfully", id=key_id, title=title, lang=lang))
+
+
+@app.delete("/models/key/{key_id}")
+async def delete_key(request: Request, key_id: str) -> JSONResponse:
+    req_token = request.headers.get("Authorization")
+    log.info(f"Deleting model key: {key_id}, {req_token}")
+    if not req_token:
+        return JSONResponse(_err("Authorization header is required."))
+    if req_token != f"Bearer {os.getenv('API_TOKEN')}":
+        return JSONResponse(_err("Invalid token."))
+
+    deleted, key_pdf_path, booklet_pdf_path = delete_model_key(key_id)
+    if not deleted:
+        return JSONResponse(_err("Model key not found."))
+    if key_pdf_path:
+        log.info(f"Deleting key PDF: {key_pdf_path}")
+        Path(key_pdf_path).unlink(missing_ok=True)
+    if booklet_pdf_path:
+        log.info(f"Deleting booklet PDF: {booklet_pdf_path}")
+        Path(booklet_pdf_path).unlink(missing_ok=True)
+    log.info(f"Model key deleted successfully: {key_id}")
+    return JSONResponse(_ok("Model key deleted successfully", id=key_id))
 
 
 @app.post("/models/answer-booklet")
