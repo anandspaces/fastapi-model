@@ -132,6 +132,16 @@ def _require_auth_username(request: Request) -> tuple[str | None, JSONResponse |
     return username, None
 
 
+def _require_auth_user(request: Request) -> tuple[dict | None, JSONResponse | None]:
+    username, err = _require_auth_username(request)
+    if err:
+        return None, err
+    user = get_user_by_username(username or "")
+    if not user:
+        return None, _unauthorized("User not found.")
+    return user, None
+
+
 @app.get("/")
 async def get_root() -> JSONResponse:
     return JSONResponse("API is running successfully!")
@@ -195,7 +205,7 @@ async def post_model_key(
     title: str = Form(...),
     lang: str = Form(...),
 ) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
     title, lang = title.strip(), lang.strip()
@@ -204,7 +214,7 @@ async def post_model_key(
     key_id = str(uuid.uuid4())
     dest = UPLOADS_DIR / f"key_{key_id}.pdf"
     try:
-        insert_key_upload(key_id, title, lang, str(dest))
+        insert_key_upload(key_id, title, lang, str(dest), user["id"])
     except Exception as e:
         log.exception("key upload failed")
         if dest.exists():
@@ -217,7 +227,7 @@ async def post_model_key(
 async def put_model_key(
     request: Request, key_id: str, payload: ModelKeyPayload
 ) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
 
@@ -226,7 +236,7 @@ async def put_model_key(
     if not title or not lang:
         return JSONResponse(_err("title and lang are required (non-empty)."))
 
-    ok, reason = update_key_upload(key_id, title, lang)
+    ok, reason = update_key_upload(key_id, title, lang, user["id"])
     log.info(f"Updated model key: {ok}, {reason}")
     if not ok:
         return JSONResponse(_err(reason or "Model key not found."))
@@ -235,11 +245,11 @@ async def put_model_key(
 
 @app.delete("/models/key/{key_id}")
 async def delete_key(request: Request, key_id: str) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
 
-    deleted, key_pdf_path, booklet_pdf_path = delete_model_key(key_id)
+    deleted, key_pdf_path, booklet_pdf_path = delete_model_key(key_id, user["id"])
     if not deleted:
         return JSONResponse(_err("Model key not found."))
     if key_pdf_path:
@@ -258,7 +268,7 @@ async def post_answer_booklet(
     id: str = Form(...),
     file: UploadFile = File(...),
 ) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
     id = id.strip()
@@ -291,7 +301,7 @@ async def post_answer_booklet(
         dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
 
-    key_record = get_key_upload(id)
+    key_record = get_key_upload(id, user["id"])
     if not key_record:
         dest.unlink(missing_ok=True)
         return JSONResponse(_err(f"No key upload found for id {id!r}."))
@@ -303,6 +313,7 @@ async def post_answer_booklet(
             key_record["lang"],
             questions,
             str(dest),
+            user["id"],
         )
     except Exception as e:
         log.exception("db insert failed")
@@ -316,10 +327,10 @@ async def post_answer_booklet(
 
 @app.get("/models/{model_id}")
 async def get_model(request: Request, model_id: str) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    row = get_answer_model(model_id)
+    row = get_answer_model(model_id, user["id"])
     if not row:
         return JSONResponse(_err("Model not found."))
     return JSONResponse(_ok("Model found", **row))
@@ -327,10 +338,10 @@ async def get_model(request: Request, model_id: str) -> JSONResponse:
 
 @app.get("/models")
 async def list_models(request: Request) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    items = list_registered_models()
+    items = list_registered_models(user["id"])
     return JSONResponse(_ok("Models listed successfully", items=items))
 
 
@@ -338,12 +349,12 @@ async def list_models(request: Request) -> JSONResponse:
 async def put_model_question(
     request: Request, model_id: str, question_id: str, payload: QuestionPayload
 ) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
 
     ok, reason = update_answer_model_question(
-        model_id, question_id, {"id": question_id, **payload.model_dump()}
+        model_id, question_id, {"id": question_id, **payload.model_dump()}, user["id"]
     )
     if not ok:
         if reason in ("Model not found", "Question not found"):
@@ -355,10 +366,10 @@ async def put_model_question(
 
 @app.delete("/models/{model_id}")
 async def delete_model(request: Request, model_id: str) -> JSONResponse:
-    _, auth_err = _require_auth_username(request)
+    user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    deleted, pdf_path = delete_answer_model(model_id)
+    deleted, pdf_path = delete_answer_model(model_id, user["id"])
     if not deleted:
         return JSONResponse(_err("Model not found."))
     if pdf_path:

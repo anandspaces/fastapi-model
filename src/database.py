@@ -27,7 +27,8 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 lang TEXT NOT NULL,
                 pdf_path TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                owner_user_id TEXT
             );
             CREATE TABLE IF NOT EXISTS answer_models (
                 id TEXT PRIMARY KEY,
@@ -36,7 +37,8 @@ def init_db() -> None:
                 questions_json TEXT NOT NULL,
                 question_count INTEGER NOT NULL,
                 booklet_pdf_path TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                owner_user_id TEXT
             );
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
@@ -46,4 +48,17 @@ def init_db() -> None:
             );
             """
         )
+        # Ensure ownership columns exist for older databases.
+        key_cols = {
+            row["name"] for row in db.execute("PRAGMA table_info(key_uploads)").fetchall()
+        }
+        if "owner_user_id" not in key_cols:
+            db.execute("ALTER TABLE key_uploads ADD COLUMN owner_user_id TEXT")
+
+        answer_cols = {
+            row["name"] for row in db.execute("PRAGMA table_info(answer_models)").fetchall()
+        }
+        if "owner_user_id" not in answer_cols:
+            db.execute("ALTER TABLE answer_models ADD COLUMN owner_user_id TEXT")
+
         db.commit()

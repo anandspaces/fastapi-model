@@ -7,20 +7,23 @@ import uuid
 from src.database import UPLOADS_DIR, get_conn
 
 
-def insert_key_upload(key_id: str, title: str, lang: str, pdf_path: str) -> None:
+def insert_key_upload(
+    key_id: str, title: str, lang: str, pdf_path: str, owner_user_id: str
+) -> None:
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with get_conn() as db:
         db.execute(
-            "INSERT INTO key_uploads (id, title, lang, pdf_path, created_at) VALUES (?,?,?,?,?)",
-            (key_id, title, lang, pdf_path, created),
+            "INSERT INTO key_uploads (id, title, lang, pdf_path, created_at, owner_user_id) VALUES (?,?,?,?,?,?)",
+            (key_id, title, lang, pdf_path, created, owner_user_id),
         )
         db.commit()
 
 
-def get_key_upload(key_id: str) -> dict | None:
+def get_key_upload(key_id: str, owner_user_id: str) -> dict | None:
     with get_conn() as db:
         row = db.execute(
-            "SELECT * FROM key_uploads WHERE id = ?", (key_id,)
+            "SELECT * FROM key_uploads WHERE id = ? AND owner_user_id = ?",
+            (key_id, owner_user_id),
         ).fetchone()
     if not row:
         return None
@@ -32,46 +35,59 @@ def get_key_upload(key_id: str) -> dict | None:
     }
 
 
-def update_key_upload(key_id: str, title: str, lang: str) -> tuple[bool, str | None]:
+def update_key_upload(
+    key_id: str, title: str, lang: str, owner_user_id: str
+) -> tuple[bool, str | None]:
     """Update title/lang in key_uploads and linked answer_models row (same id) if present."""
     with get_conn() as db:
         existing = db.execute(
-            "SELECT 1 FROM key_uploads WHERE id = ?", (key_id,)
+            "SELECT 1 FROM key_uploads WHERE id = ? AND owner_user_id = ?",
+            (key_id, owner_user_id),
         ).fetchone()
         if not existing:
             return False, "Model key not found"
 
         db.execute(
-            "UPDATE key_uploads SET title = ?, lang = ? WHERE id = ?",
-            (title, lang, key_id),
+            "UPDATE key_uploads SET title = ?, lang = ? WHERE id = ? AND owner_user_id = ?",
+            (title, lang, key_id, owner_user_id),
         )
         db.execute(
-            "UPDATE answer_models SET title = ?, lang = ? WHERE id = ?",
-            (title, lang, key_id),
+            "UPDATE answer_models SET title = ?, lang = ? WHERE id = ? AND owner_user_id = ?",
+            (title, lang, key_id, owner_user_id),
         )
         db.commit()
     return True, None
 
 
-def delete_model_key(key_id: str) -> tuple[bool, str | None, str | None]:
+def delete_model_key(
+    key_id: str, owner_user_id: str
+) -> tuple[bool, str | None, str | None]:
     """Delete key_upload and linked answer_model row by id.
 
     Returns (deleted, key_pdf_path, booklet_pdf_path).
     """
     with get_conn() as db:
         key_row = db.execute(
-            "SELECT pdf_path FROM key_uploads WHERE id = ?", (key_id,)
+            "SELECT pdf_path FROM key_uploads WHERE id = ? AND owner_user_id = ?",
+            (key_id, owner_user_id),
         ).fetchone()
         if not key_row:
             return False, None, None
 
         answer_row = db.execute(
-            "SELECT booklet_pdf_path FROM answer_models WHERE id = ?", (key_id,)
+            "SELECT booklet_pdf_path FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (key_id, owner_user_id),
         ).fetchone()
         booklet_path = answer_row["booklet_pdf_path"] if answer_row else None
 
-        db.execute("DELETE FROM key_uploads WHERE id = ?", (key_id,))
-        db.execute("DELETE FROM answer_models WHERE id = ?", (key_id,))
+        db.execute(
+            "DELETE FROM key_uploads WHERE id = ? AND owner_user_id = ?",
+            (key_id, owner_user_id),
+        )
+        db.execute(
+            "DELETE FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (key_id, owner_user_id),
+        )
         db.commit()
     return True, key_row["pdf_path"], booklet_path
 
@@ -82,6 +98,7 @@ def insert_answer_model(
     lang: str,
     questions: list,
     booklet_pdf_path: str | None,
+    owner_user_id: str,
 ) -> None:
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     qjson = json.dumps(questions, ensure_ascii=False)
@@ -89,17 +106,18 @@ def insert_answer_model(
     with get_conn() as db:
         db.execute(
             """INSERT INTO answer_models
-            (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at)
-            VALUES (?,?,?,?,?,?,?)""",
-            (model_id, title, lang, qjson, n, booklet_pdf_path, created),
+            (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (model_id, title, lang, qjson, n, booklet_pdf_path, created, owner_user_id),
         )
         db.commit()
 
 
-def get_answer_model(model_id: str) -> dict | None:
+def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
     with get_conn() as db:
         row = db.execute(
-            "SELECT * FROM answer_models WHERE id = ?", (model_id,)
+            "SELECT * FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
         ).fetchone()
     if not row:
         return None
@@ -114,7 +132,7 @@ def get_answer_model(model_id: str) -> dict | None:
     }
 
 
-def list_registered_models() -> list[dict]:
+def list_registered_models(owner_user_id: str) -> list[dict]:
     """Every id from POST /models/key (key_uploads), with title/lang.
 
     Includes rows before answer booklet is posted. ``has_booklet`` is True once
@@ -126,9 +144,13 @@ def list_registered_models() -> list[dict]:
             SELECT k.id, k.title, k.lang,
                    CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS has_booklet
             FROM key_uploads k
-            LEFT JOIN answer_models a ON a.id = k.id
+            LEFT JOIN answer_models a
+              ON a.id = k.id AND a.owner_user_id = k.owner_user_id
+            WHERE k.owner_user_id = ?
             ORDER BY k.created_at DESC
             """
+            ,
+            (owner_user_id,),
         ).fetchall()
     return [
         {
@@ -141,25 +163,30 @@ def list_registered_models() -> list[dict]:
     ]
 
 
-def delete_answer_model(model_id: str) -> tuple[bool, str | None]:
+def delete_answer_model(model_id: str, owner_user_id: str) -> tuple[bool, str | None]:
     with get_conn() as db:
         row = db.execute(
-            "SELECT booklet_pdf_path FROM answer_models WHERE id = ?", (model_id,)
+            "SELECT booklet_pdf_path FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
         ).fetchone()
         if not row:
             return False, None
         path = row["booklet_pdf_path"]
-        db.execute("DELETE FROM answer_models WHERE id = ?", (model_id,))
+        db.execute(
+            "DELETE FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
+        )
         db.commit()
     return True, path
 
 
 def update_answer_model_question(
-    model_id: str, question_id: str, new_question: dict
+    model_id: str, question_id: str, new_question: dict, owner_user_id: str
 ) -> tuple[bool, str | None]:
     with get_conn() as db:
         row = db.execute(
-            "SELECT questions_json FROM answer_models WHERE id = ?", (model_id,)
+            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
         ).fetchone()
         if not row:
             return False, "Model not found"
@@ -187,8 +214,8 @@ def update_answer_model_question(
 
         qjson = json.dumps(questions, ensure_ascii=False)
         db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ?",
-            (qjson, len(questions), model_id),
+            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
+            (qjson, len(questions), model_id, owner_user_id),
         )
         db.commit()
     return True, None
