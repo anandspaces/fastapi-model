@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 
-from src.database import UPLOADS_DIR, get_conn
+from src.database import get_conn
 
 
 def insert_key_upload(
@@ -219,6 +219,56 @@ def update_answer_model_question(
         )
         db.commit()
     return True, None
+
+
+def reorder_answer_model_questions(
+    model_id: str, owner_user_id: str, order: list[str]
+) -> tuple[bool, str | None, list[dict] | None]:
+    with get_conn() as db:
+        row = db.execute(
+            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
+        ).fetchone()
+        if not row:
+            return False, "Model not found.", None
+
+        try:
+            questions = json.loads(row["questions_json"])
+        except Exception:
+            return False, "Invalid questions_json.", None
+
+        if not isinstance(questions, list):
+            return False, "Invalid questions_json.", None
+
+        ids = [q.get("id") for q in questions if isinstance(q, dict)]
+        if len(ids) != len(questions) or any(not isinstance(i, str) or not i.strip() for i in ids):
+            return False, "Invalid questions_json.", None
+
+        if len(set(order)) != len(order):
+            return False, "Invalid order: duplicate ids.", None
+        if len(order) != len(questions):
+            return False, "Invalid order: missing question ids.", None
+
+        existing = set(ids)
+        requested = set(order)
+        if requested - existing:
+            return False, "Invalid order: unknown question ids.", None
+        if existing - requested:
+            return False, "Invalid order: missing question ids.", None
+
+        by_id = {q["id"]: q for q in questions}
+        arranged = [by_id[qid] for qid in order]
+
+        for i, q in enumerate(arranged, 1):
+            q["questionNo"] = f"Q{i}"
+
+        qjson = json.dumps(arranged, ensure_ascii=False)
+        db.execute(
+            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
+            (qjson, len(arranged), model_id, owner_user_id),
+        )
+        db.commit()
+    return True, None, arranged
 
 
 def create_user(username: str, password_hash: str) -> tuple[bool, str | None]:

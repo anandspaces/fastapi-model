@@ -19,3 +19,7 @@ class TokenData(BaseModel):
     accessToken: str
     tokenType: str = "Bearer"
     expiresIn: int
+
+
+class ReorderQuestionsPayload(BaseModel):
+    order: list[str]

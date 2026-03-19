@@ -27,9 +27,10 @@ from src.service import (
     list_registered_models,
     update_key_upload,
     update_answer_model_question,
+    reorder_answer_model_questions,
 )
 from dotenv import load_dotenv
-from src.schemas import AuthRequest, QuestionPayload, TokenData
+from src.schemas import AuthRequest, QuestionPayload, ReorderQuestionsPayload, TokenData
 
 
 class ModelKeyPayload(BaseModel):
@@ -343,6 +344,28 @@ async def list_models(request: Request) -> JSONResponse:
         return auth_err
     items = list_registered_models(user["id"])
     return JSONResponse(_ok("Models listed successfully", items=items))
+
+
+@app.put("/models/{model_id}/questions/reorder")
+async def reorder_model_questions(
+    request: Request, model_id: str, payload: ReorderQuestionsPayload
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+
+    ok, reason, arranged = reorder_answer_model_questions(model_id, user["id"], payload.order)
+    if not ok:
+        return JSONResponse(_err(reason or "Reorder failed."))
+
+    return JSONResponse(
+        _ok(
+            "Questions reordered successfully",
+            id=model_id,
+            question_count=len(arranged or []),
+            questions=arranged or [],
+        )
+    )
 
 
 @app.put("/models/{model_id}/questions/{question_id}")

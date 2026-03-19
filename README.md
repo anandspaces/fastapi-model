@@ -61,6 +61,7 @@ Data: `pdf_json/api/data/` (DB + uploads).
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet }[]` (newest first; `has_booklet` false until answer booklet is posted)
 - `GET /models/{model_id}`
 - `PUT /models/{model_id}/questions/{question_id}` — replace one question object (match by `question.id`)
+- `PUT /models/{model_id}/questions/reorder` — reorder questions by id and renumber `questionNo` as `Q1..Qn`
 - `DELETE /models/{model_id}`
 
 Responses: `{ "data": { "status": 1 \| 0, ... } }`.
@@ -68,3 +69,37 @@ Responses: `{ "data": { "status": 1 \| 0, ... } }`.
 All `/models*` and `/models/key*` endpoints require:
 
 `Authorization: Bearer <accessToken>`
+
+## Frontend Reorder Flow
+
+Suggested UI:
+
+- Render `questions` from `GET /models/{model_id}` in a drag-and-drop list.
+- Keep `originalQuestions` and `workingQuestions` in state.
+- On drag, reorder `workingQuestions` only.
+- Show `Unsaved changes` + `Save order` + `Reset`.
+
+Save request:
+
+```json
+{
+  "order": ["q-eng-003", "q-eng-001", "q-eng-002"]
+}
+```
+
+Send to:
+
+- `PUT /models/{model_id}/questions/reorder`
+
+On success:
+
+- Replace local list with `data.questions` from API response.
+- `questionNo` is already normalized (`Q1..Qn`) by backend.
+
+Validation errors returned by API:
+
+- `Model not found.`
+- `Invalid order: duplicate ids.`
+- `Invalid order: missing question ids.`
+- `Invalid order: unknown question ids.`
+- `Invalid questions_json.`
