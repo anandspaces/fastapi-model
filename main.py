@@ -78,6 +78,14 @@ def _err(message: str, **extra: object) -> dict:
     return {"status": 0, "message": message, "data":{**extra}}
 
 
+def _auth_err(
+    message: str = "Unauthorized.",
+    http_status_code: int = 401,
+    **extra: object,
+) -> JSONResponse:
+    return JSONResponse({"status": -1, "message": message, "data": {**extra}}, status_code=http_status_code)
+
+
 def _is_pdf(filename: str | None, content_type: str | None) -> bool:
     if filename and re.search(r"\.pdf$", filename, re.I):
         return True
@@ -107,30 +115,27 @@ def _create_access_token(username: str) -> TokenData:
     return TokenData(accessToken=token, expiresIn=int(expires_delta.total_seconds()))
 
 
-def _unauthorized(message: str = "Unauthorized.") -> JSONResponse:
-    return JSONResponse(_err(message))
-
 
 def _require_auth_username(request: Request) -> tuple[str | None, JSONResponse | None]:
     auth = request.headers.get("Authorization", "").strip()
     if not auth:
-        return None, _unauthorized("Authorization header is required.")
+        return None, _auth_err("Authorization header is required.")
     if not auth.lower().startswith("bearer "):
-        return None, _unauthorized("Authorization header must be Bearer token.")
+        return None, _auth_err("Authorization header must be Bearer token.")
     token = auth[7:].strip()
     if not token:
-        return None, _unauthorized("Bearer token is required.")
+        return None, _auth_err("Bearer token is required.")
     if not JWT_SECRET:
-        return None, _unauthorized("JWT_SECRET is not configured.")
+        return None, _auth_err("JWT_SECRET is not configured.")
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except InvalidTokenError:
-        return None, _unauthorized("Invalid or expired token.")
+        return None, _auth_err("Invalid or expired token.")
 
     username = str(payload.get("sub", "")).strip()
     if not username:
-        return None, _unauthorized("Invalid token payload.")
+        return None, _auth_err("Invalid token payload.")
     return username, None
 
 
@@ -140,7 +145,7 @@ def _require_auth_user(request: Request) -> tuple[dict | None, JSONResponse | No
         return None, err
     user = get_user_by_username(username or "")
     if not user:
-        return None, _unauthorized("User not found.")
+        return None, _auth_err("User not found.")
     return user, None
 
 
