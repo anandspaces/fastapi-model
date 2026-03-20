@@ -128,6 +128,20 @@ def _assign_page_nums(questions: list[dict]) -> None:
         q["pageNum"] = 2 if i < mid else 3
 
 
+def _apply_default_marks_fallback(questions: list[dict]) -> None:
+    """If Gemini returned marks=0, fallback to position-based defaults.
+
+    Rule:
+    - first half (Q1..Qmid) -> 2 marks
+    - second half -> 3 marks
+    """
+    n = len(questions)
+    mid = n // 2
+    for i, q in enumerate(questions):
+        if int(q.get("marks", 0)) == 0:
+            q["marks"] = 2 if i < mid else 3
+
+
 def normalize(obj: dict) -> dict:
     marks = _parse_marks(obj.get("marks"))
     return {
@@ -175,5 +189,6 @@ def process_pdf_path(pdf_path: Path, api_key: str) -> list[dict]:
     raw = extract_json_array(text)
     questions = [normalize(o) for o in raw]
     _assign_page_nums(questions)
+    _apply_default_marks_fallback(questions)
     log.info("[%s] Extracted %d question(s).", label, len(questions))
     return questions
