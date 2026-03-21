@@ -131,15 +131,15 @@ def _assign_page_nums(questions: list[dict]) -> None:
 def _apply_default_marks_fallback(questions: list[dict]) -> None:
     """If Gemini returned marks=0, fallback to position-based defaults.
 
-    Rule:
-    - first half (Q1..Qmid) -> 2 marks
-    - second half -> 3 marks
+    Uses the same first/second half split as `_assign_page_nums` (indices [0, mid) vs [mid, n)):
+    - first half -> 8 marks
+    - second half -> 12 marks
     """
     n = len(questions)
     mid = n // 2
     for i, q in enumerate(questions):
         if int(q.get("marks", 0)) == 0:
-            q["marks"] = 2 if i < mid else 3
+            q["marks"] = 8 if i < mid else 12
 
 
 def normalize(obj: dict) -> dict:
