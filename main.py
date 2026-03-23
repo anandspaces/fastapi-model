@@ -13,6 +13,13 @@ from pydantic import BaseModel
 import jwt
 from jwt.exceptions import InvalidTokenError
 from passlib.context import CryptContext
+from google import genai
+from src.gemini_analyse import (
+    analyse_cached_ocr,
+    analyse_intro_page,
+    analyse_pages,
+    generate_combined_review,
+)
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
@@ -31,7 +38,14 @@ from src.service import (
     reorder_answer_model_questions,
 )
 from dotenv import load_dotenv
-from src.schemas import AuthRequest, QuestionPayload, ReorderQuestionsPayload, TokenData
+from src.schemas import (
+    AuthRequest,
+    CachedOcrRequest,
+    CombinedReviewRequest,
+    QuestionPayload,
+    ReorderQuestionsPayload,
+    TokenData,
+)
 
 
 class ModelKeyPayload(BaseModel):
@@ -427,3 +441,135 @@ async def delete_model(request: Request, model_id: str) -> JSONResponse:
     if pdf_path:
         Path(pdf_path).unlink(missing_ok=True)
     return JSONResponse(_ok("Model deleted successfully"))
+
+
+def _valid_lang(code: str) -> bool:
+    return code.strip().lower() in ("en", "hi")
+
+
+@app.post("/analyse/pages")
+async def post_analyse_pages(
+    request: Request,
+    pages: list[UploadFile] = File(...),
+    question_title: str = Form(...),
+    model_description: str = Form(...),
+    total_marks: int = Form(...),
+    language: str = Form(...),
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    if not pages:
+        return JSONResponse(_err("pages field is required"))
+    if total_marks < 1:
+        return JSONResponse(_err("total_marks must be a positive integer"))
+    lang = language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    blobs: list[bytes] = []
+    for p in pages:
+        raw = await p.read()
+        if raw:
+            blobs.append(raw)
+    if not blobs:
+        return JSONResponse(_err("pages field is required"))
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(
+            analyse_pages,
+            client,
+            blobs,
+            question_title.strip(),
+            model_description.strip(),
+            total_marks,
+            lang,
+        )
+    except Exception as e:
+        log.exception("analyse/pages failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Analysis complete.", **result))
+
+
+@app.post("/analyse/cached-ocr")
+async def post_analyse_cached_ocr(
+    request: Request, payload: CachedOcrRequest
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    lang = payload.language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(
+            analyse_cached_ocr,
+            client,
+            payload.cached_student_text,
+            payload.question_title.strip(),
+            payload.model_description.strip(),
+            payload.total_marks,
+            payload.page_count,
+            lang,
+        )
+    except Exception as e:
+        log.exception("analyse/cached-ocr failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Analysis complete.", **result))
+
+
+@app.post("/analyse/combined-review")
+async def post_combined_review(
+    request: Request, payload: CombinedReviewRequest
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    rows = [q.model_dump() for q in payload.question_results]
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(generate_combined_review, client, rows)
+    except Exception as e:
+        log.exception("analyse/combined-review failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Combined review generated.", **result))
+
+
+@app.post("/analyse/intro-page")
+async def post_analyse_intro_page(
+    request: Request, page: UploadFile = File(...)
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    raw = await page.read()
+    if not raw:
+        return JSONResponse(_err("page field is required"))
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(analyse_intro_page, client, raw)
+    except ValueError as e:
+        if "Could not detect" in str(e) or "no text" in str(e).lower():
+            return JSONResponse(_err(str(e)), status_code=422)
+        log.exception("analyse/intro-page failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    except Exception as e:
+        log.exception("analyse/intro-page failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Intro page analysed.", **result))

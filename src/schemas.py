@@ -23,3 +23,26 @@ class TokenData(BaseModel):
 
 class ReorderQuestionsPayload(BaseModel):
     order: list[str]
+
+
+class CachedOcrRequest(BaseModel):
+    cached_student_text: str = Field(min_length=1)
+    question_title: str
+    model_description: str
+    total_marks: int = Field(ge=1)
+    page_count: int = Field(ge=1)
+    language: str
+
+
+class QuestionResultItem(BaseModel):
+    question_no: str
+    title: str
+    marks_awarded: float
+    marks_total: int
+    good_points: str
+    improvements: str
+    final_review: str
+
+
+class CombinedReviewRequest(BaseModel):
+    question_results: list[QuestionResultItem] = Field(min_length=1)
