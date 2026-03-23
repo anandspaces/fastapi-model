@@ -47,8 +47,9 @@ uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | `database.py` | DB path constants, SQLite connection helper, and schema init |
 | `service.py` | All helper methods for key/booklet CRUD |
 | `gemini_extract.py` | Gemini PDF → questions JSON |
+| `gemini_analyse.py` | AI copy-checker: grading, combined review, intro marks table |
 
-Data: `pdf_json/api/data/` (DB + uploads).
+Data: `data/` at repo root (DB + uploads).
 
 ## Endpoints
 
@@ -65,9 +66,18 @@ Data: `pdf_json/api/data/` (DB + uploads).
 - `PUT /models/{model_id}/questions/reorder` — reorder questions by id and renumber `questionNo` as `Q1..Qn`
 - `DELETE /models/{model_id}`
 
-Responses: `{ "data": { "status": 1 \| 0, ... } }`.
+### AI Copy Checker (`/analyse/*`)
 
-All `/models*` and `/models/key*` endpoints require:
+All require `Authorization: Bearer <accessToken>`. Success uses `{ "status": 1, "message": "...", "data": { ... } }` (same as other routes).
+
+- `POST /analyse/pages` — multipart: `pages` (repeatable image files), `question_title`, `model_description`, `total_marks`, `language` (`en` \| `hi`)
+- `POST /analyse/cached-ocr` — JSON: `cached_student_text`, `question_title`, `model_description`, `total_marks`, `page_count`, `language`
+- `POST /analyse/combined-review` — JSON: `question_results` (array of per-question summaries)
+- `POST /analyse/intro-page` — multipart: `page` (JPEG/PNG). Returns `data.cells` or `422` if no marks table detected.
+
+Responses: `{ "status": 1 \| 0 \| -1, "message": ..., "data": { ... } }` (errors from validation use `status: 0`; auth failures `status: -1`).
+
+All `/models*`, `/models/key*`, and `/analyse*` endpoints require:
 
 `Authorization: Bearer <accessToken>`
 
