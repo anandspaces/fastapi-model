@@ -231,6 +231,57 @@ Authorization: Bearer <accessToken>
 
 ---
 
+### POST `/models/qna`
+
+Imports **questions only** from an uploaded PDF (via Gemini), then calls Gemini **once per question** to generate a model/reference **answer**. Results are returned in the response body only; **nothing is persisted** in this phase (no UUID row, no follow-up GET for this flow).
+
+- Content-Type: `multipart/form-data`
+- Auth required: Yes
+
+#### Request form fields
+
+- `file` (PDF file, required)
+- `language` (string, optional; default `en`. Use `hi` for Hindi-oriented answers.)
+
+#### Success Response (`200`)
+
+```json
+{
+  "status": 1,
+  "message": "Questions imported and answered.",
+  "data": {
+    "questions": [
+      {
+        "question_id": "q-001",
+        "question_no": "Q1",
+        "question": "Full question text…",
+        "answer": "Model answer text…"
+      }
+    ]
+  }
+}
+```
+
+#### No questions found (`200`, business failure)
+
+When the PDF has no extractable exam-style questions:
+
+```json
+{
+  "status": 0,
+  "message": "No question found.",
+  "data": {
+    "questions": []
+  }
+}
+```
+
+#### Future work
+
+Persistence under a UUID and retrieval via `GET /models/{model_id}` (or a dedicated route) may be added later; clients should not rely on storage for this endpoint today.
+
+---
+
 ### GET `/models`
 
 - Content-Type: none
@@ -575,6 +626,7 @@ Same structure as `/analyse/pages`.
    - `POST /models/key`
    - `POST /models/answer-booklet`
    - manage via `GET/PUT/DELETE /models*` endpoints
+   - Optional one-shot (no DB): `POST /models/qna` — returns questions + Gemini answers in `data` only
 5. For AI checking workflow:
    - `POST /analyse/pages`
    - optionally `POST /analyse/cached-ocr`
@@ -589,7 +641,7 @@ Authorization: Bearer <accessToken>
 
 ### Timeout / Retry Suggestions (client)
 
-- Use longer timeout for AI endpoints (60-180s depending on image/page count).
+- Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /models/qna` can take several minutes (one model call per extracted question plus the import pass).
 - Retry on network failures and `5xx` with exponential backoff.
 - For `/analyse/intro-page`, treat `422` as a valid “not detected” business outcome.
 

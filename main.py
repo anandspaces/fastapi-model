@@ -21,6 +21,7 @@ from src.gemini_analyse import (
     generate_combined_review,
 )
 from src.gemini_extract import load_api_key, process_pdf_path
+from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
     create_user,
@@ -344,6 +345,56 @@ async def post_answer_booklet(
     return JSONResponse(
         _ok("Answer booklet uploaded successfully", id=id, questions=questions)
     )
+
+
+# FUTURE: Persist the import Q+A payload under a UUID (e.g. insert into answer_models +
+# key_uploads, or a dedicated table) and expose GET /models/{id} (or a new route) so clients
+# can reload the same questions + answers without re-running Gemini. Not implemented in this phase.
+@app.post("/models/qna")
+async def post_import_questions_with_answers(
+    request: Request,
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+) -> JSONResponse:
+    _, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    if not _is_pdf(file.filename, file.content_type):
+        return JSONResponse(_err("file must be a PDF."))
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(_err("empty file."))
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = UPLOADS_DIR / f"import_qa_{uuid.uuid4()}.pdf"
+    try:
+        dest.write_bytes(raw)
+        try:
+            api_key = load_api_key()
+        except ValueError as e:
+            return JSONResponse(_err(str(e)))
+        lang = (language or "en").strip() or "en"
+        try:
+            result = await asyncio.to_thread(
+                run_pdf_questions_and_answers, dest, api_key, lang
+            )
+        except Exception as e:
+            log.exception("import questions with answers pipeline failed")
+            return JSONResponse(_err(str(e)))
+        if result["kind"] == "no_questions":
+            return JSONResponse(_err("No question found.", questions=[]))
+        return JSONResponse(
+            _ok(
+                "Questions imported and answered.",
+                questions=result["questions"],
+            )
+        )
+    except Exception as e:
+        log.exception("import Q+A save failed")
+        return JSONResponse(_err(str(e)))
+    finally:
+        dest.unlink(missing_ok=True)
 
 
 @app.get("/models/{model_id}")
