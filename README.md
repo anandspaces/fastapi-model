@@ -55,12 +55,12 @@ Data: `data/` at repo root (DB + uploads).
 
 - `POST /auth/signup` — JSON: `username`, `password`
 - `POST /auth/login` — JSON: `username`, `password` -> token data (`accessToken`, `tokenType`, `expiresIn`)
-- `POST /models/key` — multipart: `title`, `lang`, optional `type` (`standard` \| `custom`; drives `POST /models/answer-booklet` processing for that id)
-- `PUT /models/key/{key_id}` — update model key metadata (`title`, `lang`)
+- `POST /models/key` — multipart: `title`, `lang`, optional `type` (`standard` \| `custom` \| `essay`; drives `POST /models/answer-booklet` processing for that id; `essay` uses the same PDF path as `custom` with longer generated answers)
+- `PUT /models/key/{key_id}` — update model key metadata (`title`, `lang`, optional `booklet_type`: `standard` \| `custom` \| `essay`)
 - `DELETE /models/key/{key_id}` — delete model key (and linked answer model if present)
 - `POST /models/answer-booklet` — multipart: `id`, `file` (PDF); booklet mode comes from the key’s `type` set at `POST /models/key`
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet, booklet_type }[]` (`booklet_type` null until booklet exists)
-- `GET /models/{model_id}`
+- `GET /models/{model_id}` — full model payload includes `booklet_type`
 - `POST /models/{model_id}/create_question` — JSON body same as PUT question (no `id`); `diagramDescriptions` optional (default `[]`); works after `POST /models/key` (bootstraps answer model if needed); `POST /models/answer-booklet` later replaces questions from the PDF
 - `PUT /models/{model_id}/questions/{question_id}` — replace one question object (match by `question.id`)
 - `DELETE /models/{model_id}/questions/{question_id}` — delete one question by `question.id` and renumber remaining `questionNo`

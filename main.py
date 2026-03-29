@@ -27,21 +27,23 @@ from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
+    BOOKLET_TYPES,
+    _normalize_booklet_type,
     add_answer_model_question,
+    bulk_patch_answer_model_question_page_marks,
     create_user,
+    delete_answer_model,
     delete_answer_model_question,
     delete_model_key,
-    delete_answer_model,
     get_answer_model,
     get_key_upload,
     get_user_by_username,
-    upsert_answer_model_from_booklet,
     insert_key_upload,
     list_registered_models,
-    bulk_patch_answer_model_question_page_marks,
-    update_key_upload,
-    update_answer_model_question,
     reorder_answer_model_questions,
+    update_answer_model_question,
+    update_key_upload,
+    upsert_answer_model_from_booklet,
 )
 from dotenv import load_dotenv
 from src.schemas import (
@@ -243,8 +245,10 @@ async def post_model_key(
     if not title or not lang:
         return JSONResponse(_err("title and lang are required (non-empty)."))
     bt_raw = (booklet_type_param or "standard").strip().lower()
-    if bt_raw not in ("standard", "custom"):
-        return JSONResponse(_err('type must be "standard" or "custom".'))
+    if bt_raw not in BOOKLET_TYPES:
+        return JSONResponse(
+            _err('type must be "standard", "custom", or "essay".')
+        )
     key_id = str(uuid.uuid4())
     dest = UPLOADS_DIR / f"key_{key_id}.pdf"
     try:
@@ -286,9 +290,9 @@ async def put_model_key(
             update_kw["booklet_type"] = None
         else:
             vv = str(v).strip().lower()
-            if vv not in ("standard", "custom"):
+            if vv not in BOOKLET_TYPES:
                 return JSONResponse(
-                    _err('booklet_type must be "standard" or "custom".')
+                    _err('booklet_type must be "standard", "custom", or "essay".')
                 )
             update_kw["booklet_type"] = vv
 
@@ -345,9 +349,7 @@ async def post_answer_booklet(
     if not key_record:
         return JSONResponse(_err(f"No key upload found for id {id!r}."))
 
-    bt_raw = str(key_record.get("booklet_type") or "standard").strip().lower()
-    if bt_raw not in ("standard", "custom"):
-        bt_raw = "standard"
+    bt_raw = _normalize_booklet_type(str(key_record.get("booklet_type") or "standard"))
 
     dest = UPLOADS_DIR / f"booklet_{id}.pdf"
     try:
@@ -378,6 +380,7 @@ async def post_answer_booklet(
                 dest,
                 api_key,
                 key_record["lang"],
+                bt_raw,
             )
             if result["kind"] == "no_questions":
                 dest.unlink(missing_ok=True)

@@ -1,6 +1,6 @@
 """Orchestrate: PDF → import questions → Gemini answers per question.
 
-No HTTP. Persistence is handled by ``POST /models/answer-booklet`` when the model key was created with ``type=custom``.
+No HTTP. Persistence is handled by ``POST /models/answer-booklet`` when the model key was created with ``type=custom`` or ``type=essay`` (same PDF path; essay uses longer generated answers).
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ def run_pdf_questions_and_answers(
     pdf_path: Path,
     api_key: str,
     language: str = "en",
+    booklet_type: str = "custom",
 ) -> PdfQaPipelineResult:
     """Run full pipeline on *pdf_path*.
 
@@ -39,5 +40,7 @@ def run_pdf_questions_and_answers(
     if not imported:
         return {"kind": "no_questions"}
 
-    filled = fill_answers_for_questions(imported, api_key, language)
+    filled = fill_answers_for_questions(
+        imported, api_key, language, booklet_type=booklet_type
+    )
     return {"kind": "ok", "questions": filled}

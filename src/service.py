@@ -9,10 +9,12 @@ from src.database import get_conn
 
 _Q_ENG_ID = re.compile(r"^q-eng-(\d+)$", re.I)
 
+BOOKLET_TYPES = frozenset({"standard", "custom", "essay"})
+
 
 def _normalize_booklet_type(raw: str) -> str:
     t = (raw or "standard").strip().lower()
-    return t if t in ("standard", "custom") else "standard"
+    return t if t in BOOKLET_TYPES else "standard"
 
 
 def insert_key_upload(
@@ -133,9 +135,7 @@ def insert_answer_model(
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     qjson = json.dumps(questions, ensure_ascii=False)
     n = len(questions)
-    bt = (booklet_type or "standard").strip().lower()
-    if bt not in ("standard", "custom"):
-        bt = "standard"
+    bt = _normalize_booklet_type(booklet_type)
     with get_conn() as db:
         db.execute(
             """INSERT INTO answer_models
@@ -224,16 +224,19 @@ def list_registered_models(owner_user_id: str) -> list[dict]:
             ,
             (owner_user_id,),
         ).fetchall()
-    return [
-        {
-            "id": r["id"],
-            "title": r["title"],
-            "lang": r["lang"],
-            "has_booklet": bool(r["has_booklet"]),
-            "booklet_type": r["booklet_type"] if r["booklet_type"] is not None else None,
-        }
-        for r in rows
-    ]
+    out: list[dict] = []
+    for r in rows:
+        bt = r["booklet_type"] if r["booklet_type"] is not None else None
+        out.append(
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "lang": r["lang"],
+                "has_booklet": bool(r["has_booklet"]),
+                "booklet_type": bt,
+            }
+        )
+    return out
 
 
 def delete_answer_model(model_id: str, owner_user_id: str) -> tuple[bool, str | None]:

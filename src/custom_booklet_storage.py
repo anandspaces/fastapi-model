@@ -1,4 +1,4 @@
-"""Map custom QnA pipeline rows to the same question dict shape as ``process_pdf_path``."""
+"""Map custom/essay QnA pipeline rows to the same question dict shape as ``process_pdf_path``."""
 
 from __future__ import annotations
 
