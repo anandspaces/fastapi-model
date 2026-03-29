@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from google import genai
 from google.genai import types
@@ -15,6 +16,9 @@ from google.genai import types
 from src.gemini_extract import MODEL_ID
 
 log = logging.getLogger(__name__)
+
+# Cap concurrent Gemini answer calls to limit rate spikes (custom booklet path).
+_ANSWER_PARALLEL_WORKERS = 5
 
 _ANSWER_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
@@ -78,24 +82,50 @@ def generate_answer_for_question(
     return _parse_answer_json(raw)
 
 
+def _fetch_answer_row(q: dict[str, str], api_key: str, language: str) -> dict[str, str]:
+    """One Gemini call per task; own Client (not shared across threads)."""
+    qtext = q["question_text"]
+    client = genai.Client(api_key=api_key)
+    try:
+        answer = generate_answer_for_question(client, qtext, language)
+    except Exception:
+        log.exception(
+            "Answer generation failed for question %s",
+            q.get("questionNo", "?"),
+        )
+        raise
+    return {
+        "question_id": q["id"],
+        "question_no": q["questionNo"],
+        "question": qtext,
+        "answer": answer,
+    }
+
+
 def fill_answers_for_questions(
     questions: list[dict[str, str]],
     api_key: str,
     language: str = "en",
 ) -> list[dict[str, str]]:
-    """For each imported row (id, questionNo, question_text), append Gemini ``answer``."""
-    client = genai.Client(api_key=api_key)
-    out: list[dict[str, str]] = []
-    for i, q in enumerate(questions):
-        qtext = q["question_text"]
-        log.info("Generating answer for question %s (%d/%d)", q.get("questionNo"), i + 1, len(questions))
-        answer = generate_answer_for_question(client, qtext, language)
-        out.append(
-            {
-                "question_id": q["id"],
-                "question_no": q["questionNo"],
-                "question": qtext,
-                "answer": answer,
-            }
+    """For each imported row (id, questionNo, question_text), append Gemini ``answer``.
+
+    Runs up to ``_ANSWER_PARALLEL_WORKERS`` answer requests in parallel (I/O-bound).
+    Result order matches *questions*.
+    """
+    if not questions:
+        return []
+
+    n = len(questions)
+    workers = min(_ANSWER_PARALLEL_WORKERS, n)
+    log.info("Generating answers for %d question(s) with up to %d parallel workers", n, workers)
+
+    if workers <= 1:
+        return [_fetch_answer_row(q, api_key, language) for q in questions]
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(
+            executor.map(
+                lambda q: _fetch_answer_row(q, api_key, language),
+                questions,
+            )
         )
-    return out
