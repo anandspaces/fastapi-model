@@ -371,6 +371,52 @@ Other APIs can branch on `booklet_type` when different behavior is needed for cu
 
 ---
 
+### PUT `/models/questions/bulk-page-marks`
+
+- Content-Type: `application/json`
+- Auth required: Yes
+
+Updates `pageNum` and `marks` for **many** questions on one answer model in a single request. Unknown `questionId` values are **skipped** (listed in the response); the request still succeeds. If the same `questionId` appears more than once in `items`, **the last entry wins**.
+
+JSON field names use **camelCase**, consistent with question objects elsewhere (`questionNo`, `pageNum`, `marks`).
+
+#### Request
+
+```json
+{
+  "modelKey": "uuid-same-as-model-id",
+  "items": [
+    { "questionId": "q-eng-001", "pageNum": 2, "marks": 8 },
+    { "questionId": "q-eng-002", "pageNum": 3, "marks": 4 }
+  ]
+}
+```
+
+- `items` may be an empty array (no database write; model must exist).
+
+#### Success Response (`200`)
+
+```json
+{
+  "status": 1,
+  "message": "Question page and marks bulk update applied.",
+  "data": {
+    "modelKey": "uuid-same-as-model-id",
+    "updatedQuestionIds": ["q-eng-001", "q-eng-002"],
+    "notFoundQuestionIds": ["q-eng-999"],
+    "updatedCount": 2,
+    "notFoundCount": 1
+  }
+}
+```
+
+#### Error Response (`200`, `status: 0`)
+
+- Model missing or not owned by the user: `message` is `Model not found`.
+- Corrupt `questions_json`: `message` is `Invalid questions_json`.
+
+---
+
 ### PUT `/models/{model_id}/questions/reorder`
 
 - Content-Type: `application/json`

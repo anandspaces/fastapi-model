@@ -25,6 +25,19 @@ class ReorderQuestionsPayload(BaseModel):
     order: list[str]
 
 
+class QuestionPageMarksItem(BaseModel):
+    """CamelCase field names match JSON for other question-shaped payloads (e.g. QuestionPayload)."""
+
+    questionId: str = Field(min_length=1)
+    pageNum: int = Field(ge=1)
+    marks: int = Field(ge=0)
+
+
+class BulkQuestionPageMarksPayload(BaseModel):
+    modelKey: str = Field(min_length=1)
+    items: list[QuestionPageMarksItem]
+
+
 class CachedOcrRequest(BaseModel):
     cached_student_text: str = Field(min_length=1)
     question_title: str

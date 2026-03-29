@@ -36,6 +36,7 @@ from src.service import (
     insert_answer_model,
     insert_key_upload,
     list_registered_models,
+    bulk_patch_answer_model_question_page_marks,
     update_key_upload,
     update_answer_model_question,
     reorder_answer_model_questions,
@@ -46,6 +47,7 @@ from src.schemas import (
     CachedOcrRequest,
     CombinedReviewRequest,
     ExpandModelAnswerRequest,
+    BulkQuestionPageMarksPayload,
     QuestionPayload,
     ReorderQuestionsPayload,
     TokenData,
@@ -468,6 +470,55 @@ async def put_model_question(
         return JSONResponse(_err(reason or "Update failed"))
 
     return JSONResponse(_ok("Question updated successfully", id=model_id, question_id=question_id))
+
+
+@app.put("/models/questions/bulk-page-marks")
+async def put_questions_bulk_page_marks(
+    request: Request, payload: BulkQuestionPageMarksPayload
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+
+    mk = payload.modelKey.strip()
+    tuples = [
+        (it.questionId.strip(), it.pageNum, it.marks) for it in payload.items
+    ]
+    log.info(
+        "models/questions/bulk-page-marks start user_id=%s modelKey=%s item_count=%d",
+        user.get("id"),
+        mk,
+        len(tuples),
+    )
+    ok, reason, updated_ids, not_found_ids = bulk_patch_answer_model_question_page_marks(
+        mk, user["id"], tuples
+    )
+    if not ok:
+        log.warning(
+            "models/questions/bulk-page-marks failed user_id=%s modelKey=%s reason=%s",
+            user.get("id"),
+            mk,
+            reason,
+        )
+        return JSONResponse(_err(reason or "Update failed"))
+
+    log.info(
+        "models/questions/bulk-page-marks ok user_id=%s modelKey=%s updated=%d not_found=%d",
+        user.get("id"),
+        mk,
+        len(updated_ids),
+        len(not_found_ids),
+    )
+    return JSONResponse(
+        _ok(
+            "Question page and marks bulk update applied.",
+            modelKey=mk,
+            updatedQuestionIds=updated_ids,
+            notFoundQuestionIds=not_found_ids,
+            updatedCount=len(updated_ids),
+            notFoundCount=len(not_found_ids),
+        )
+    )
 
 
 @app.delete("/models/{model_id}/questions/{question_id}")

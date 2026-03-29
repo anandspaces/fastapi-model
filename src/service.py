@@ -256,6 +256,70 @@ def update_answer_model_question(
     return True, None
 
 
+def bulk_patch_answer_model_question_page_marks(
+    model_id: str,
+    owner_user_id: str,
+    items: list[tuple[str, int, int]],
+) -> tuple[bool, str | None, list[str], list[str]]:
+    """Apply pageNum/marks for many question ids. Unknown ids skipped (reported in not_found).
+
+    Duplicate question_ids in *items*: last occurrence wins. Returns
+    (ok, error, updated_question_ids, not_found_question_ids).
+    """
+    with get_conn() as db:
+        row = db.execute(
+            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
+        ).fetchone()
+        if not row:
+            return False, "Model not found", [], []
+
+        if not items:
+            return True, None, [], []
+
+        try:
+            questions = json.loads(row["questions_json"])
+        except Exception:
+            return False, "Invalid questions_json", [], []
+
+        if not isinstance(questions, list):
+            return False, "Invalid questions_json", [], []
+
+        id_to_index: dict[str, int] = {}
+        for i, q in enumerate(questions):
+            if isinstance(q, dict) and isinstance(q.get("id"), str) and q["id"].strip():
+                id_to_index[q["id"].strip()] = i
+
+        updated_order: list[str] = []
+        seen_updated: set[str] = set()
+        not_found_order: list[str] = []
+        seen_nf: set[str] = set()
+
+        for qid_raw, page_num, marks in items:
+            qid = (qid_raw or "").strip()
+            if not qid:
+                continue
+            idx = id_to_index.get(qid)
+            if idx is None:
+                if qid not in seen_nf:
+                    seen_nf.add(qid)
+                    not_found_order.append(qid)
+                continue
+            questions[idx]["pageNum"] = int(page_num)
+            questions[idx]["marks"] = int(marks)
+            if qid not in seen_updated:
+                seen_updated.add(qid)
+                updated_order.append(qid)
+
+        qjson = json.dumps(questions, ensure_ascii=False)
+        db.execute(
+            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
+            (qjson, len(questions), model_id, owner_user_id),
+        )
+        db.commit()
+    return True, None, updated_order, not_found_order
+
+
 def reorder_answer_model_questions(
     model_id: str, owner_user_id: str, order: list[str]
 ) -> tuple[bool, str | None, list[dict] | None]:
