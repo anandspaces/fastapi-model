@@ -36,7 +36,9 @@ def run_pdf_questions_and_answers(
     Returns ``{"kind": "ok", "questions": [...]}`` with ``question_id``, ``question_no``,
     ``question``, ``answer`` per item.
     """
-    imported = extract_questions_from_pdf(pdf_path, api_key)
+    imported = extract_questions_from_pdf(
+        pdf_path, api_key, booklet_type=booklet_type
+    )
     if not imported:
         return {"kind": "no_questions"}
 

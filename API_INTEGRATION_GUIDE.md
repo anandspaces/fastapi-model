@@ -250,6 +250,8 @@ Same envelope and `data` keys for all booklet modes:
 
 When the key is `custom` or `essay`, `data.booklet_type` is that value. Each question uses the same keys; typically `pageNum` is `1`, `marks` is `0`, and `desc` holds the generated model answer.
 
+**Question order (`custom` / `essay`):** Questions may appear on the PDF in any layout order (e.g. Q1, then Q5, then Q7). The server asks Gemini to return them in **ascending logical question order** and then **re-sorts** by printed `questionNo` as a safety net. Internal `id` values are `q-001`, `q-002`, … in that sorted order; `questionNo` stays as printed (e.g. `"Q5"` is not renamed).
+
 #### No questions found (key `custom` or `essay`, `200` business failure)
 
 When the PDF has no extractable exam-style questions, nothing is persisted and the uploaded file is removed:
