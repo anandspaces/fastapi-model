@@ -146,6 +146,41 @@ def insert_answer_model(
         db.commit()
 
 
+def upsert_answer_model_from_booklet(
+    model_id: str,
+    title: str,
+    lang: str,
+    questions: list,
+    booklet_pdf_path: str,
+    owner_user_id: str,
+    booklet_type: str = "standard",
+) -> None:
+    """Insert or update answer_models after PDF booklet processing (replaces questions if row exists)."""
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    qjson = json.dumps(questions, ensure_ascii=False)
+    n = len(questions)
+    bt = _normalize_booklet_type(booklet_type)
+    with get_conn() as db:
+        row = db.execute(
+            "SELECT id FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
+        ).fetchone()
+        if row:
+            db.execute(
+                """UPDATE answer_models SET title = ?, lang = ?, questions_json = ?, question_count = ?,
+                   booklet_pdf_path = ?, booklet_type = ? WHERE id = ? AND owner_user_id = ?""",
+                (title, lang, qjson, n, booklet_pdf_path, bt, model_id, owner_user_id),
+            )
+        else:
+            db.execute(
+                """INSERT INTO answer_models
+                (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id, booklet_type)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (model_id, title, lang, qjson, n, booklet_pdf_path, created, owner_user_id, bt),
+            )
+        db.commit()
+
+
 def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
     with get_conn() as db:
         row = db.execute(
@@ -239,6 +274,9 @@ def add_answer_model_question(
 ) -> tuple[bool, str | None, str | None, int | None]:
     """Append one question; assign next q-eng-NNN id; renumber questionNo to Q1..Qn.
 
+    If no answer_models row exists yet but the model key exists (key_uploads), creates answer_models
+    with this question and no booklet PDF (booklet can be uploaded later via POST /models/answer-booklet).
+
     Returns (ok, error, new_question_id, question_count).
     """
     with get_conn() as db:
@@ -247,7 +285,42 @@ def add_answer_model_question(
             (model_id, owner_user_id),
         ).fetchone()
         if not row:
-            return False, "Model not found", None, None
+            key_row = db.execute(
+                "SELECT title, lang, booklet_type FROM key_uploads WHERE id = ? AND owner_user_id = ?",
+                (model_id, owner_user_id),
+            ).fetchone()
+            if not key_row:
+                return False, "Model key not found for this user.", None, None
+
+            questions: list = []
+            new_id = _next_q_eng_id(questions)
+            new_obj = {**fields, "id": new_id}
+            questions = [new_obj]
+            for i, q in enumerate(questions, 1):
+                if isinstance(q, dict):
+                    q["questionNo"] = f"Q{i}"
+
+            qjson = json.dumps(questions, ensure_ascii=False)
+            created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            bt = _normalize_booklet_type(dict(key_row).get("booklet_type"))
+            db.execute(
+                """INSERT INTO answer_models
+                (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id, booklet_type)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    model_id,
+                    key_row["title"],
+                    key_row["lang"],
+                    qjson,
+                    1,
+                    None,
+                    created,
+                    owner_user_id,
+                    bt,
+                ),
+            )
+            db.commit()
+            return True, None, new_id, 1
 
         try:
             questions = json.loads(row["questions_json"])

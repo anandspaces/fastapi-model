@@ -7,7 +7,7 @@ class QuestionPayload(BaseModel):
     desc: str
     pageNum: int = Field(ge=1)
     marks: int = Field(ge=0)
-    diagramDescriptions: list[str]
+    diagramDescriptions: list[str] = Field(default_factory=list)
 
 
 class AuthRequest(BaseModel):

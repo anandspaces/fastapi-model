@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 import logging
 import re
@@ -34,7 +35,7 @@ from src.service import (
     get_answer_model,
     get_key_upload,
     get_user_by_username,
-    insert_answer_model,
+    upsert_answer_model_from_booklet,
     insert_key_upload,
     list_registered_models,
     bulk_patch_answer_model_question_page_marks,
@@ -388,7 +389,7 @@ async def post_answer_booklet(
         return JSONResponse(_err(str(e)))
 
     try:
-        insert_answer_model(
+        upsert_answer_model_from_booklet(
             id,
             key_record["title"],
             key_record["lang"],
@@ -454,6 +455,18 @@ async def reorder_model_questions(
     )
 
 
+def _question_payload_log_dict(payload: QuestionPayload) -> dict[str, object]:
+    d = payload.model_dump()
+    desc = str(d.get("desc") or "")
+    preview_len = 300
+    prev = desc[:preview_len] + (f"... (+{len(desc) - preview_len} chars)" if len(desc) > preview_len else "")
+    d["desc"] = prev.replace("\r", " ").replace("\n", " ")
+    d["diagramDescriptions_count"] = len(d.get("diagramDescriptions") or [])
+    if "diagramDescriptions" in d:
+        del d["diagramDescriptions"]
+    return d
+
+
 @app.post("/models/{model_id}/create_question")
 async def post_model_question(
     request: Request, model_id: str, payload: QuestionPayload
@@ -461,15 +474,32 @@ async def post_model_question(
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
+    log.info(
+        "POST create_question incoming user_id=%s model_id=%s body=%s",
+        user.get("id"),
+        model_id,
+        json.dumps(_question_payload_log_dict(payload), ensure_ascii=False),
+    )
 
     ok, reason, new_id, q_count = add_answer_model_question(
         model_id, user["id"], payload.model_dump()
     )
     if not ok:
-        if reason == "Model not found":
-            return JSONResponse(_err(reason))
+        log.warning(
+            "POST create_question failed user_id=%s model_id=%s reason=%s",
+            user.get("id"),
+            model_id,
+            reason,
+        )
         return JSONResponse(_err(reason or "Create failed"))
 
+    log.info(
+        "POST create_question ok user_id=%s model_id=%s questionId=%s question_count=%s",
+        user.get("id"),
+        model_id,
+        new_id,
+        q_count,
+    )
     return JSONResponse(
         _ok(
             "Question created successfully",

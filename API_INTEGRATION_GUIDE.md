@@ -206,6 +206,8 @@ Authorization: Bearer <accessToken>
 
 Uploads a PDF for an existing model key. Processing mode (**standard** vs **custom**) is taken from the key’s stored `type` / `booklet_type` (set at `POST /models/key` or `PUT /models/key/{key_id}`), not from this request.
 
+If an `answer_models` row already exists for this id (for example you used **`POST /models/{model_id}/create_question`** first), this endpoint **updates** it: **`questions` in the database are replaced** by whatever the PDF pipeline extracts, and the booklet file path is set.
+
 - Content-Type: `multipart/form-data`
 - Auth required: Yes
 
@@ -343,7 +345,7 @@ Other APIs can branch on `booklet_type` when different behavior is needed for cu
 - Content-Type: `application/json`
 - Auth required: Yes
 
-Creates a new question on an existing answer model. Requires **`POST /models/answer-booklet`** to have succeeded for this `model_id` first (otherwise `Model not found`).
+Creates a new question for a model **key** you already registered (`POST /models/key`). If no answer booklet row exists yet, the server **creates** `answer_models` with your question and a null booklet PDF; you can upload a PDF later with **`POST /models/answer-booklet`** (which will replace questions with the extracted set from the file). If the `model_id` is unknown or not owned by you, you get an error.
 
 #### Request
 
@@ -360,6 +362,7 @@ Creates a new question on an existing answer model. Requires **`POST /models/ans
 }
 ```
 
+- **`diagramDescriptions`** is optional; omit it or send `[]` when there are no diagrams.
 - **`questionNo` in the body is overwritten** after create: every question’s `questionNo` is renumbered to `Q1`, `Q2`, … in array order (same behaviour as after deleting a question).
 - New **`id`**: next available `q-eng-001`, `q-eng-002`, … by scanning existing question ids matching `q-eng-` + three digits.
 
@@ -379,7 +382,7 @@ Creates a new question on an existing answer model. Requires **`POST /models/ans
 
 #### Error Response (`200`, `status: 0`)
 
-- No answer model for this id / user: `Model not found`.
+- No **`POST /models/key`** row for this id / user: `Model key not found for this user.`
 - Corrupt `questions_json`: `Invalid questions_json`.
 
 ---
