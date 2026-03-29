@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import re
 import os
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,11 @@ from src.gemini_analyse import (
     generate_combined_review,
 )
 from src.custom_booklet_storage import custom_qna_rows_to_canonical_questions
+from src.gemini_copy_ocr import (
+    copy_ocr_max_bytes,
+    ocr_essay_copy_pdf,
+    ocr_essay_copy_pdf_rasterized,
+)
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
@@ -729,6 +735,172 @@ async def post_analyse_pages(
         log.exception("analyse/pages failed")
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
     return JSONResponse(_ok("Analysis complete.", **result))
+
+
+@app.post("/analyse/copy-ocr")
+async def post_analyse_copy_ocr(
+    request: Request,
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    lang = language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    if not _is_pdf(file.filename, file.content_type):
+        return JSONResponse(_err("file must be a PDF."))
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(_err("file is empty."))
+    max_bytes = copy_ocr_max_bytes()
+    if len(raw) > max_bytes:
+        return JSONResponse(
+            _err(
+                f"PDF exceeds maximum size ({max_bytes} bytes). "
+                "Reduce the file or raise COPY_OCR_MAX_BYTES."
+            )
+        )
+    if not raw.startswith(b"%PDF"):
+        return JSONResponse(_err("file does not look like a valid PDF."))
+    rid = str(uuid.uuid4())
+    log.info(
+        "analyse/copy-ocr start request_id=%s user_id=%s filename=%r bytes=%s max_bytes=%s",
+        rid,
+        user.get("id"),
+        file.filename,
+        len(raw),
+        max_bytes,
+    )
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    tmp: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw)
+        result = await asyncio.to_thread(
+            ocr_essay_copy_pdf,
+            tmp,
+            api_key,
+            lang,
+            request_id=rid,
+        )
+    except ValueError as e:
+        log.warning("analyse/copy-ocr rejected request_id=%s: %s", rid, e)
+        return JSONResponse(_err(str(e)))
+    except Exception as e:
+        log.exception("analyse/copy-ocr failed request_id=%s", rid)
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                log.warning("analyse/copy-ocr temp unlink failed path=%s", tmp)
+    log.info(
+        "analyse/copy-ocr ok request_id=%s page_count=%s text_chars=%s",
+        rid,
+        result.get("page_count"),
+        len(str(result.get("text", ""))),
+    )
+    return JSONResponse(
+        _ok(
+            "OCR complete.",
+            text=result["text"],
+            pageCount=result["page_count"],
+        )
+    )
+
+
+@app.post("/analyse/copy-ocr-rasterization")
+async def post_analyse_copy_ocr_rasterization(
+    request: Request,
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    lang = language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    if not _is_pdf(file.filename, file.content_type):
+        return JSONResponse(_err("file must be a PDF."))
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(_err("file is empty."))
+    max_bytes = copy_ocr_max_bytes()
+    if len(raw) > max_bytes:
+        return JSONResponse(
+            _err(
+                f"PDF exceeds maximum size ({max_bytes} bytes). "
+                "Reduce the file or raise COPY_OCR_MAX_BYTES."
+            )
+        )
+    if not raw.startswith(b"%PDF"):
+        return JSONResponse(_err("file does not look like a valid PDF."))
+    rid = str(uuid.uuid4())
+    log.info(
+        "analyse/copy-ocr-rasterization start request_id=%s user_id=%s filename=%r bytes=%s max_bytes=%s",
+        rid,
+        user.get("id"),
+        file.filename,
+        len(raw),
+        max_bytes,
+    )
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    tmp: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw)
+        result = await asyncio.to_thread(
+            ocr_essay_copy_pdf_rasterized,
+            tmp,
+            api_key,
+            lang,
+            request_id=rid,
+        )
+    except ValueError as e:
+        log.warning("analyse/copy-ocr-rasterization rejected request_id=%s: %s", rid, e)
+        return JSONResponse(_err(str(e)))
+    except Exception as e:
+        log.exception("analyse/copy-ocr-rasterization failed request_id=%s", rid)
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                log.warning(
+                    "analyse/copy-ocr-rasterization temp unlink failed path=%s", tmp
+                )
+    log.info(
+        "analyse/copy-ocr-rasterization ok request_id=%s page_count=%s text_chars=%s dpi=%s workers=%s",
+        rid,
+        result.get("page_count"),
+        len(str(result.get("text", ""))),
+        result.get("dpi"),
+        result.get("workers"),
+    )
+    return JSONResponse(
+        _ok(
+            "OCR complete.",
+            text=result["text"],
+            pageCount=result["page_count"],
+            rasterDpi=result["dpi"],
+            parallelWorkers=result["workers"],
+        )
+    )
 
 
 @app.post("/analyse/cached-ocr")

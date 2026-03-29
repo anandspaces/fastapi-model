@@ -11,6 +11,10 @@ Copy [`.env.example`](.env.example) to `.env` and set:
 | `GEMINI_API_KEY` | Gemini API (PDF → questions) |
 | `JWT_SECRET` | Secret used to sign JWT access tokens |
 | `JWT_EXPIRES_MINUTES` | JWT lifetime in minutes (default `60`) |
+| `COPY_OCR_MAX_BYTES` | Max PDF upload for copy-OCR routes (default ~25 MiB) |
+| `COPY_OCR_MAX_PAGES` | Max PDF pages for copy-OCR routes (default `30`) |
+| `COPY_OCR_RASTER_DPI` | Render DPI for `POST /analyse/copy-ocr-rasterization` (default `150`) |
+| `COPY_OCR_PARALLEL_WORKERS` | Max concurrent Gemini calls for rasterization OCR (default `5`) |
 
 ## Docker
 
@@ -48,6 +52,7 @@ uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | `service.py` | All helper methods for key/booklet CRUD |
 | `gemini_extract.py` | Gemini PDF → questions JSON |
 | `gemini_analyse.py` | AI copy-checker: grading, combined review, intro marks table |
+| `gemini_copy_ocr.py` | Essay copy OCR: whole-PDF (`/analyse/copy-ocr`) and raster + parallel (`/analyse/copy-ocr-rasterization`) |
 
 Data: `data/` at repo root (DB + uploads).
 
@@ -72,6 +77,8 @@ Data: `data/` at repo root (DB + uploads).
 All require `Authorization: Bearer <accessToken>`. Success uses `{ "status": 1, "message": "...", "data": { ... } }` (same as other routes).
 
 - `POST /analyse/pages` — multipart: `pages` (repeatable image files), `question_title`, `model_description`, `total_marks`, `language` (`en` \| `hi`)
+- `POST /analyse/copy-ocr` — multipart: `file` (PDF), optional `language` (`en` \| `hi`); whole-PDF essay copy OCR (`text` + `pageCount`; limits `COPY_OCR_MAX_BYTES` / `COPY_OCR_MAX_PAGES`)
+- `POST /analyse/copy-ocr-rasterization` — same inputs; rasterizes each page (PyMuPDF) and OCRs pages in parallel (up to `COPY_OCR_PARALLEL_WORKERS`, default 5); `data` adds `rasterDpi`, `parallelWorkers`
 - `POST /analyse/cached-ocr` — JSON: `cached_student_text`, `question_title`, `model_description`, `total_marks`, `page_count`, `language`
 - `POST /analyse/combined-review` — JSON: `question_results` (array of per-question summaries)
 - `POST /analyse/intro-page` — multipart: `page` (JPEG/PNG). Returns `data.cells` or `422` if no marks table detected.

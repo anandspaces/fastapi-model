@@ -643,6 +643,95 @@ Allow **60–180s** depending on `type` (essay responses are longer to generate)
 
 ---
 
+### POST `/analyse/copy-ocr`
+
+Whole-PDF OCR for a **single-question essay-style student answer** (handwriting or print). The server uploads the PDF once to Gemini (File API) and runs **one** `generate_content` call; nothing is stored in the database.
+
+- Content-Type: `multipart/form-data`
+- Auth required: Yes
+
+#### Limits
+
+- **Size:** Rejects uploads larger than **`COPY_OCR_MAX_BYTES`** (default `26214400` ≈ 25 MiB). Configurable in `.env`.
+- **Pages:** Counts pages with **pypdf** before calling Gemini; rejects if **`COPY_OCR_MAX_PAGES`** (default `30`) is exceeded.
+- The file must start with the PDF magic bytes `%PDF`.
+
+#### Request form fields
+
+- `file` (PDF file, required)
+- `language` (string, optional; default `en`) — must be `en` or `hi` when sent
+
+#### Success Response (`200`)
+
+```json
+{
+  "status": 1,
+  "message": "OCR complete.",
+  "data": {
+    "text": "Full plain-text transcript of the student copy…",
+    "pageCount": 3
+  }
+}
+```
+
+#### Validation / business errors (`200`, `status: 0`)
+
+- Not a PDF, empty file, over byte or page limit, unreadable PDF, or OCR returned empty text: explanatory `message`.
+- Missing `GEMINI_API_KEY`: same pattern as other Gemini routes.
+
+#### AI / parsing failures (`500`)
+
+Same pattern as `/analyse/pages`: `status: 0`, `message` prefixed with `AI service error:`.
+
+#### Client timeouts
+
+Allow **60–180s**; large or dense scans may need the upper end.
+
+---
+
+### POST `/analyse/copy-ocr-rasterization`
+
+Same use case as **`/analyse/copy-ocr`** (single-question essay copy → plain text, **no DB**), but each PDF page is **rasterized** (PyMuPDF) to PNG and sent to Gemini in **parallel** with up to **`COPY_OCR_PARALLEL_WORKERS`** concurrent threads (default **5**). Full text is page sections joined as `--- Page N ---` blocks.
+
+- Content-Type: `multipart/form-data`
+- Auth required: Yes
+
+#### Limits
+
+- Same **`COPY_OCR_MAX_BYTES`** and **`COPY_OCR_MAX_PAGES`** as `/analyse/copy-ocr`.
+- **`COPY_OCR_RASTER_DPI`** (default `150`) — render resolution for each page image.
+- **`COPY_OCR_PARALLEL_WORKERS`** (default `5`) — max concurrent Gemini calls (capped at page count).
+
+#### Request form fields
+
+- `file` (PDF file, required)
+- `language` (string, optional; default `en`) — `en` or `hi`
+
+#### Success Response (`200`)
+
+```json
+{
+  "status": 1,
+  "message": "OCR complete.",
+  "data": {
+    "text": "--- Page 1 ---\n…\n\n--- Page 2 ---\n…",
+    "pageCount": 2,
+    "rasterDpi": 150,
+    "parallelWorkers": 5
+  }
+}
+```
+
+#### Notes
+
+- **More Gemini calls** than `/analyse/copy-ocr` (one per page); watch quotas and allow **longer client timeouts** when many pages are processed in parallel batches.
+
+#### Errors
+
+Same pattern as `/analyse/copy-ocr` (`status: 0` for validation, `500` + `AI service error:` for AI failures).
+
+---
+
 ### POST `/analyse/cached-ocr`
 
 - Content-Type: `application/json`
@@ -790,6 +879,7 @@ Same structure as `/analyse/pages`.
    - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `essay` for length — see section 5)
 5. For AI checking workflow:
    - `POST /analyse/pages`
+   - optional `POST /analyse/copy-ocr` or `POST /analyse/copy-ocr-rasterization` (essay PDF → plain `text` + `pageCount`, no DB; rasterization = per-page parallel OCR)
    - optionally `POST /analyse/cached-ocr`
    - `POST /analyse/combined-review`
    - optionally `POST /analyse/intro-page` (separate intro-only use case)
@@ -802,7 +892,8 @@ Authorization: Bearer <accessToken>
 
 ### Timeout / Retry Suggestions (client)
 
-- Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /models/answer-booklet` for a key with `type=custom` or `type=essay` can take several minutes (one Gemini call per extracted question plus the import pass; `essay` answers are longer to generate).
+- Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /analyse/copy-ocr` for multi-page PDFs: prefer **60–180s**. `POST /analyse/copy-ocr-rasterization` with many pages: prefer the **upper end** or higher (multiple sequential Gemini waves).
+- `POST /models/answer-booklet` for a key with `type=custom` or `type=essay` can take several minutes (one Gemini call per extracted question plus the import pass; `essay` answers are longer to generate).
 - `POST /model/answer-expand`: allow at least **60–180s**; prefer the upper end when `type` is `essay`.
 - Retry on network failures and `5xx` with exponential backoff.
 - For `/analyse/intro-page`, treat `422` as a valid “not detected” business outcome.
@@ -869,6 +960,24 @@ curl -X POST "http://127.0.0.1:8000/model/answer-expand" \
     "question": "Discuss the main causes of climate change.",
     "language": "en"
   }'
+```
+
+### Essay copy OCR (PDF)
+
+```bash
+curl -X POST "http://127.0.0.1:8000/analyse/copy-ocr" \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@/absolute/path/student_essay.pdf;type=application/pdf" \
+  -F "language=en"
+```
+
+### Essay copy OCR — rasterization + parallel pages
+
+```bash
+curl -X POST "http://127.0.0.1:8000/analyse/copy-ocr-rasterization" \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@/absolute/path/student_essay.pdf;type=application/pdf" \
+  -F "language=en"
 ```
 
 ### Analyse pages
