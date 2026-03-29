@@ -46,3 +46,11 @@ class QuestionResultItem(BaseModel):
 
 class CombinedReviewRequest(BaseModel):
     question_results: list[QuestionResultItem] = Field(min_length=1)
+
+
+class ExpandModelAnswerRequest(BaseModel):
+    type: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+    diagram_description: str = ""
+    language: str = "en"

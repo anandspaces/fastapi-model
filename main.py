@@ -21,6 +21,7 @@ from src.gemini_analyse import (
     generate_combined_review,
 )
 from src.custom_booklet_storage import custom_qna_rows_to_canonical_questions
+from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
@@ -44,6 +45,7 @@ from src.schemas import (
     AuthRequest,
     CachedOcrRequest,
     CombinedReviewRequest,
+    ExpandModelAnswerRequest,
     QuestionPayload,
     ReorderQuestionsPayload,
     TokenData,
@@ -506,6 +508,70 @@ async def delete_model(request: Request, model_id: str) -> JSONResponse:
 
 def _valid_lang(code: str) -> bool:
     return code.strip().lower() in ("en", "hi")
+
+
+@app.post("/model/answer-expand")
+async def post_model_answer_expand(
+    request: Request, payload: ExpandModelAnswerRequest
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    lang = payload.language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    bt = payload.type.strip().lower()
+    if bt not in ("standard", "custom", "essay"):
+        log.info(
+            "model-answer/expand rejected invalid type=%r user_id=%s",
+            payload.type.strip(),
+            user.get("id"),
+        )
+        return JSONResponse(
+            _err('type must be "standard", "custom", or "essay".')
+        )
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    log.info(
+        "model-answer/expand start user_id=%s type=%s lang=%s",
+        user.get("id"),
+        bt,
+        lang,
+    )
+    try:
+        result = await asyncio.to_thread(
+            expand_model_answer,
+            api_key,
+            answer_type=bt,
+            question=payload.question,
+            draft_answer=payload.answer,
+            diagram_description=payload.diagram_description,
+            language=lang,
+        )
+    except Exception as e:
+        log.exception(
+            "model-answer/expand failed user_id=%s type=%s",
+            user.get("id"),
+            bt,
+        )
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    log.info(
+        "model-answer/expand ok user_id=%s type=%s answer_chars=%d diagram_chars=%d",
+        user.get("id"),
+        bt,
+        len(result["answer"]),
+        len(result["diagram_description"]),
+    )
+    return JSONResponse(
+        _ok(
+            "Model answer expanded.",
+            type=bt,
+            answer=result["answer"],
+            diagram_description=result["diagram_description"],
+        )
+    )
 
 
 @app.post("/analyse/pages")

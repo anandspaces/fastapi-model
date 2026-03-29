@@ -422,7 +422,78 @@ Other APIs can branch on `booklet_type` when different behavior is needed for cu
 
 ---
 
-## 5) AI Analyse APIs
+## 5) Model answer expansion (stateless)
+
+Expands a user-provided draft into a full examiner-style model answer using Gemini. **Nothing is stored** in the database. This endpoint’s `type` field is **only** for answer length (`standard` / `custom` ≈ 300 words, `essay` ≈ 1200 words). It is **not** the same as the booklet `type` on `POST /models/key` (which remains `standard` or `custom` only).
+
+Implementation reference: [`src/gemini_expand_model_answer.py`](src/gemini_expand_model_answer.py).
+
+### POST `/model/answer-expand`
+
+- Content-Type: `application/json`
+- Auth required: Yes
+
+#### Request (JSON body)
+
+| Field | Type | Required | Notes |
+|--------|------|----------|--------|
+| `type` | string | Yes | `standard`, `custom`, or `essay` (case-insensitive after trim). `standard` and `custom` use the same target length (~300 words). `essay` uses ~1200 words. |
+| `question` | string | Yes | Exam question text (non-empty). |
+| `answer` | string | Yes | Draft or reference answer to expand (non-empty). |
+| `diagram_description` | string | No | Notes for any required diagram; default empty string. |
+| `language` | string | No | Default `en`. Must be `en` or `hi` when provided. |
+
+#### Success Response (`200`)
+
+```json
+{
+  "status": 1,
+  "message": "Model answer expanded.",
+  "data": {
+    "type": "essay",
+    "answer": "Full expanded model answer text...",
+    "diagram_description": "Marking-key style diagram guidance, or empty string if none."
+  }
+}
+```
+
+#### Validation / business errors (`200`, `status: 0`)
+
+- Invalid `type`:
+
+```json
+{
+  "status": 0,
+  "message": "type must be \"standard\", \"custom\", or \"essay\".",
+  "data": {}
+}
+```
+
+- Invalid `language`:
+
+```json
+{
+  "status": 0,
+  "message": "language must be en or hi",
+  "data": {}
+}
+```
+
+- Missing `GEMINI_API_KEY` (or similar config): `status: 0` with an explanatory `message`.
+
+Pydantic may return **`422`** if required JSON fields are missing or `question` / `answer` are empty (below `min_length`).
+
+#### AI failures (`500`)
+
+Same pattern as other Gemini routes: `status: 0`, `message` prefixed with `AI service error:`.
+
+#### Client timeouts
+
+Allow **60–180s** depending on `type` (essay responses are longer to generate).
+
+---
+
+## 6) AI Analyse APIs
 
 > Intro-page flow is separate and optional. If full pages are provided for grading, intro flow can be handled independently.
 
@@ -582,7 +653,7 @@ Same structure as `/analyse/pages`.
 
 ---
 
-## 6) Error Handling Matrix
+## 7) Error Handling Matrix
 
 | Case | HTTP | Body |
 |---|---:|---|
@@ -602,7 +673,7 @@ Same structure as `/analyse/pages`.
 
 ---
 
-## 7) Client Integration Guide
+## 8) Client Integration Guide
 
 ### Recommended Flow
 
@@ -613,6 +684,7 @@ Same structure as `/analyse/pages`.
    - `POST /models/key` (sets `title`, `lang`, and optional `type` / booklet mode: `standard` or `custom`)
    - `POST /models/answer-booklet` with `id` and `file` only (mode comes from the key)
    - manage via `GET/PUT/DELETE /models*` endpoints
+   - Optional: `POST /model/answer-expand` to turn a draft into a full model answer (no DB; separate `type` values `standard` / `custom` / `essay` for length — see section 5)
 5. For AI checking workflow:
    - `POST /analyse/pages`
    - optionally `POST /analyse/cached-ocr`
@@ -628,12 +700,13 @@ Authorization: Bearer <accessToken>
 ### Timeout / Retry Suggestions (client)
 
 - Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /models/answer-booklet` for a key with `type=custom` can take several minutes (one Gemini call per extracted question plus the import pass).
+- `POST /model/answer-expand`: allow at least **60–180s**; prefer the upper end when `type` is `essay`.
 - Retry on network failures and `5xx` with exponential backoff.
 - For `/analyse/intro-page`, treat `422` as a valid “not detected” business outcome.
 
 ---
 
-## 8) Quick cURL Snippets
+## 9) Quick cURL Snippets
 
 ### Login
 
@@ -670,6 +743,21 @@ curl -X POST "http://127.0.0.1:8000/models/answer-booklet" \
   -H "Authorization: Bearer <token>" \
   -F "id=<model_id>" \
   -F "file=@/absolute/path/booklet.pdf;type=application/pdf"
+```
+
+### Expand model answer (stateless)
+
+```bash
+curl -X POST "http://127.0.0.1:8000/model/answer-expand" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "essay",
+    "question": "Discuss the main causes of climate change.",
+    "answer": "Brief bullet notes or draft from the user.",
+    "diagram_description": "Optional: sketch of carbon cycle.",
+    "language": "en"
+  }'
 ```
 
 ### Analyse pages
