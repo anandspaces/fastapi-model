@@ -470,7 +470,11 @@ JSON field names use **camelCase**, consistent with question objects elsewhere (
 
 ## 5) Model answer expansion (stateless)
 
-Expands a user-provided draft into a full examiner-style model answer using Gemini. **Nothing is stored** in the database. This endpoint’s `type` field is **only** for answer length (`standard` / `custom` ≈ 300 words, `essay` ≈ 1200 words). It is **not** the same as the booklet `type` on `POST /models/key` (which remains `standard` or `custom` only).
+Generates a full examiner-style model answer from the **question text only** using Gemini (no user draft). **Nothing is stored** in the database. This endpoint’s `type` field is **only** for answer length (`standard` / `custom` ≈ 300 words, `essay` ≈ 1200 words). It is **not** the same as the booklet `type` on `POST /models/key` (which remains `standard` or `custom` only).
+
+Response `diagramDescriptions` uses the same camelCase array shape as question objects elsewhere (`diagramDescriptions` on each question).
+
+**Breaking change:** Earlier versions required `answer` and optional `diagram_description` in the request and returned a single `diagram_description` string. Clients must send only `type` and `question` (plus optional `language`) and must read `diagramDescriptions` as an array.
 
 Implementation reference: [`src/gemini_expand_model_answer.py`](src/gemini_expand_model_answer.py).
 
@@ -485,8 +489,6 @@ Implementation reference: [`src/gemini_expand_model_answer.py`](src/gemini_expan
 |--------|------|----------|--------|
 | `type` | string | Yes | `standard`, `custom`, or `essay` (case-insensitive after trim). `standard` and `custom` use the same target length (~300 words). `essay` uses ~1200 words. |
 | `question` | string | Yes | Exam question text (non-empty). |
-| `answer` | string | Yes | Draft or reference answer to expand (non-empty). |
-| `diagram_description` | string | No | Notes for any required diagram; default empty string. |
 | `language` | string | No | Default `en`. Must be `en` or `hi` when provided. |
 
 #### Success Response (`200`)
@@ -497,11 +499,16 @@ Implementation reference: [`src/gemini_expand_model_answer.py`](src/gemini_expan
   "message": "Model answer expanded.",
   "data": {
     "type": "essay",
-    "answer": "Full expanded model answer text...",
-    "diagram_description": "Marking-key style diagram guidance, or empty string if none."
+    "answer": "Full model answer text...",
+    "diagramDescriptions": [
+      "Labeled sketch of the carbon cycle with reservoirs and arrows.",
+      "Graph of temperature vs time with axis labels."
+    ]
   }
 }
 ```
+
+If no diagram is appropriate, `diagramDescriptions` is `[]`.
 
 #### Validation / business errors (`200`, `status: 0`)
 
@@ -527,7 +534,7 @@ Implementation reference: [`src/gemini_expand_model_answer.py`](src/gemini_expan
 
 - Missing `GEMINI_API_KEY` (or similar config): `status: 0` with an explanatory `message`.
 
-Pydantic may return **`422`** if required JSON fields are missing or `question` / `answer` are empty (below `min_length`).
+Pydantic may return **`422`** if required JSON fields are missing or `question` is empty (below `min_length`).
 
 #### AI failures (`500`)
 
@@ -730,7 +737,7 @@ Same structure as `/analyse/pages`.
    - `POST /models/key` (sets `title`, `lang`, and optional `type` / booklet mode: `standard` or `custom`)
    - `POST /models/answer-booklet` with `id` and `file` only (mode comes from the key)
    - manage via `GET/PUT/DELETE /models*` endpoints
-   - Optional: `POST /model/answer-expand` to turn a draft into a full model answer (no DB; separate `type` values `standard` / `custom` / `essay` for length — see section 5)
+   - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `essay` for length — see section 5)
 5. For AI checking workflow:
    - `POST /analyse/pages`
    - optionally `POST /analyse/cached-ocr`
@@ -800,8 +807,6 @@ curl -X POST "http://127.0.0.1:8000/model/answer-expand" \
   -d '{
     "type": "essay",
     "question": "Discuss the main causes of climate change.",
-    "answer": "Brief bullet notes or draft from the user.",
-    "diagram_description": "Optional: sketch of carbon cycle.",
     "language": "en"
   }'
 ```

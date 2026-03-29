@@ -64,6 +64,4 @@ class CombinedReviewRequest(BaseModel):
 class ExpandModelAnswerRequest(BaseModel):
     type: str = Field(min_length=1)
     question: str = Field(min_length=1)
-    answer: str = Field(min_length=1)
-    diagram_description: str = ""
     language: str = "en"

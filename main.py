@@ -597,8 +597,6 @@ async def post_model_answer_expand(
             api_key,
             answer_type=bt,
             question=payload.question,
-            draft_answer=payload.answer,
-            diagram_description=payload.diagram_description,
             language=lang,
         )
     except Exception as e:
@@ -608,19 +606,20 @@ async def post_model_answer_expand(
             bt,
         )
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    diags = result["diagramDescriptions"]
     log.info(
-        "model-answer/expand ok user_id=%s type=%s answer_chars=%d diagram_chars=%d",
+        "model-answer/expand ok user_id=%s type=%s answer_chars=%d diagram_count=%d",
         user.get("id"),
         bt,
         len(result["answer"]),
-        len(result["diagram_description"]),
+        len(diags),
     )
     return JSONResponse(
         _ok(
             "Model answer expanded.",
             type=bt,
             answer=result["answer"],
-            diagram_description=result["diagram_description"],
+            diagramDescriptions=diags,
         )
     )
 
