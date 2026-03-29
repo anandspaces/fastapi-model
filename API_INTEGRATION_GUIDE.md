@@ -338,7 +338,7 @@ Other APIs can branch on `booklet_type` when different behavior is needed for cu
 
 ## 4) Question Management APIs
 
-### POST `/models/{model_id}/create-question`
+### POST `/models/{model_id}/create_question`
 
 - Content-Type: `application/json`
 - Auth required: Yes

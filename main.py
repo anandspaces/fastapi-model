@@ -454,7 +454,7 @@ async def reorder_model_questions(
     )
 
 
-@app.post("/models/{model_id}/create-question")
+@app.post("/models/{model_id}/create_question")
 async def post_model_question(
     request: Request, model_id: str, payload: QuestionPayload
 ) -> JSONResponse:

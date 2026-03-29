@@ -61,7 +61,7 @@ Data: `data/` at repo root (DB + uploads).
 - `POST /models/answer-booklet` — multipart: `id`, `file` (PDF); booklet mode comes from the key’s `type` set at `POST /models/key`
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet, booklet_type }[]` (`booklet_type` null until booklet exists)
 - `GET /models/{model_id}`
-- `POST /models/{model_id}/create-question` — JSON body same as PUT question (no `id`); appends question, assigns next `q-eng-NNN`, renumbers `questionNo`; requires booklet uploaded
+- `POST /models/{model_id}/create_question` — JSON body same as PUT question (no `id`); appends question, assigns next `q-eng-NNN`, renumbers `questionNo`; requires booklet uploaded
 - `PUT /models/{model_id}/questions/{question_id}` — replace one question object (match by `question.id`)
 - `DELETE /models/{model_id}/questions/{question_id}` — delete one question by `question.id` and renumber remaining `questionNo`
 - `PUT /models/{model_id}/questions/reorder` — reorder questions by id and renumber `questionNo` as `Q1..Qn`
