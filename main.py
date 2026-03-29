@@ -20,6 +20,7 @@ from src.gemini_analyse import (
     analyse_pages,
     generate_combined_review,
 )
+from src.custom_booklet_storage import custom_qna_rows_to_canonical_questions
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
@@ -52,6 +53,7 @@ from src.schemas import (
 class ModelKeyPayload(BaseModel):
     title: str
     lang: str
+    booklet_type: str | None = None
 
 
 load_dotenv()
@@ -226,6 +228,7 @@ async def post_model_key(
     request: Request,
     title: str = Form(...),
     lang: str = Form(...),
+    booklet_type_param: str = Form("standard", alias="type"),
 ) -> JSONResponse:
     user, auth_err = _require_auth_user(request)
     if auth_err:
@@ -233,16 +236,27 @@ async def post_model_key(
     title, lang = title.strip(), lang.strip()
     if not title or not lang:
         return JSONResponse(_err("title and lang are required (non-empty)."))
+    bt_raw = (booklet_type_param or "standard").strip().lower()
+    if bt_raw not in ("standard", "custom"):
+        return JSONResponse(_err('type must be "standard" or "custom".'))
     key_id = str(uuid.uuid4())
     dest = UPLOADS_DIR / f"key_{key_id}.pdf"
     try:
-        insert_key_upload(key_id, title, lang, str(dest), user["id"])
+        insert_key_upload(key_id, title, lang, str(dest), user["id"], booklet_type=bt_raw)
     except Exception as e:
         log.exception("key upload failed")
         if dest.exists():
             dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
-    return JSONResponse(_ok("Key uploaded successfully", id=key_id, title=title, lang=lang))
+    return JSONResponse(
+        _ok(
+            "Key uploaded successfully",
+            id=key_id,
+            title=title,
+            lang=lang,
+            booklet_type=bt_raw,
+        )
+    )
 
 
 @app.put("/models/key/{key_id}")
@@ -258,11 +272,35 @@ async def put_model_key(
     if not title or not lang:
         return JSONResponse(_err("title and lang are required (non-empty)."))
 
-    ok, reason = update_key_upload(key_id, title, lang, user["id"])
+    update_kw: dict = {}
+    dumped = payload.model_dump(exclude_unset=True)
+    if "booklet_type" in dumped:
+        v = dumped["booklet_type"]
+        if v is None:
+            update_kw["booklet_type"] = None
+        else:
+            vv = str(v).strip().lower()
+            if vv not in ("standard", "custom"):
+                return JSONResponse(
+                    _err('booklet_type must be "standard" or "custom".')
+                )
+            update_kw["booklet_type"] = vv
+
+    ok, reason = update_key_upload(key_id, title, lang, user["id"], **update_kw)
     log.info(f"Updated model key: {ok}, {reason}")
     if not ok:
         return JSONResponse(_err(reason or "Model key not found."))
-    return JSONResponse(_ok("Model key updated successfully", id=key_id, title=title, lang=lang))
+    row = get_key_upload(key_id, user["id"])
+    bt_out = (row or {}).get("booklet_type", "standard")
+    return JSONResponse(
+        _ok(
+            "Model key updated successfully",
+            id=key_id,
+            title=title,
+            lang=lang,
+            booklet_type=bt_out,
+        )
+    )
 
 
 @app.delete("/models/key/{key_id}")
@@ -296,8 +334,16 @@ async def post_answer_booklet(
     id = id.strip()
     if not id:
         return JSONResponse(_err("id is required (non-empty)."))
+
+    key_record = get_key_upload(id, user["id"])
+    if not key_record:
+        return JSONResponse(_err(f"No key upload found for id {id!r}."))
+
+    bt_raw = str(key_record.get("booklet_type") or "standard").strip().lower()
+    if bt_raw not in ("standard", "custom"):
+        bt_raw = "standard"
+
     dest = UPLOADS_DIR / f"booklet_{id}.pdf"
-    log.info(f"Saving booklet to {dest} with id {id}")
     try:
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         raw = await file.read()
@@ -309,24 +355,32 @@ async def post_answer_booklet(
         if dest.exists():
             dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
-    log.info(f"File read completed from {dest}")
+    log.info("Booklet saved to %s id=%s booklet_type=%s", dest, id, bt_raw)
+
     try:
         api_key = load_api_key()
     except ValueError as e:
         dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
-    log.info(f"Extracting questions from {dest} with API key {api_key}")
+
     try:
-        questions = await asyncio.to_thread(process_pdf_path, dest, api_key)
+        if bt_raw == "standard":
+            questions = await asyncio.to_thread(process_pdf_path, dest, api_key)
+        else:
+            result = await asyncio.to_thread(
+                run_pdf_questions_and_answers,
+                dest,
+                api_key,
+                key_record["lang"],
+            )
+            if result["kind"] == "no_questions":
+                dest.unlink(missing_ok=True)
+                return JSONResponse(_err("No question found.", questions=[]))
+            questions = custom_qna_rows_to_canonical_questions(result["questions"])
     except Exception as e:
-        log.exception("Gemini extraction failed")
+        log.exception("answer booklet processing failed (booklet_type=%s)", bt_raw)
         dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
-
-    key_record = get_key_upload(id, user["id"])
-    if not key_record:
-        dest.unlink(missing_ok=True)
-        return JSONResponse(_err(f"No key upload found for id {id!r}."))
 
     try:
         insert_answer_model(
@@ -336,6 +390,7 @@ async def post_answer_booklet(
             questions,
             str(dest),
             user["id"],
+            booklet_type=bt_raw,
         )
     except Exception as e:
         log.exception("db insert failed")
@@ -343,58 +398,13 @@ async def post_answer_booklet(
         return JSONResponse(_err(str(e)))
 
     return JSONResponse(
-        _ok("Answer booklet uploaded successfully", id=id, questions=questions)
-    )
-
-
-# FUTURE: Persist the import Q+A payload under a UUID (e.g. insert into answer_models +
-# key_uploads, or a dedicated table) and expose GET /models/{id} (or a new route) so clients
-# can reload the same questions + answers without re-running Gemini. Not implemented in this phase.
-@app.post("/models/qna")
-async def post_import_questions_with_answers(
-    request: Request,
-    file: UploadFile = File(...),
-    language: str = Form("en"),
-) -> JSONResponse:
-    _, auth_err = _require_auth_user(request)
-    if auth_err:
-        return auth_err
-    if not _is_pdf(file.filename, file.content_type):
-        return JSONResponse(_err("file must be a PDF."))
-
-    raw = await file.read()
-    if not raw:
-        return JSONResponse(_err("empty file."))
-
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOADS_DIR / f"import_qa_{uuid.uuid4()}.pdf"
-    try:
-        dest.write_bytes(raw)
-        try:
-            api_key = load_api_key()
-        except ValueError as e:
-            return JSONResponse(_err(str(e)))
-        lang = (language or "en").strip() or "en"
-        try:
-            result = await asyncio.to_thread(
-                run_pdf_questions_and_answers, dest, api_key, lang
-            )
-        except Exception as e:
-            log.exception("import questions with answers pipeline failed")
-            return JSONResponse(_err(str(e)))
-        if result["kind"] == "no_questions":
-            return JSONResponse(_err("No question found.", questions=[]))
-        return JSONResponse(
-            _ok(
-                "Questions imported and answered.",
-                questions=result["questions"],
-            )
+        _ok(
+            "Answer booklet uploaded successfully",
+            id=id,
+            questions=questions,
+            booklet_type=bt_raw,
         )
-    except Exception as e:
-        log.exception("import Q+A save failed")
-        return JSONResponse(_err(str(e)))
-    finally:
-        dest.unlink(missing_ok=True)
+    )
 
 
 @app.get("/models/{model_id}")

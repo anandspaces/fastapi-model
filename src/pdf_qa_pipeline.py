@@ -1,10 +1,6 @@
 """Orchestrate: PDF → import questions → Gemini answers per question.
 
-No database, no HTTP. See route in ``main`` for the API surface.
-
-FUTURE (not implemented): persist the returned payload under a UUID (e.g. answer_models +
-key_uploads) and expose GET /models/{{id}} (or a dedicated route) to reload the same
-questions + answers without re-running Gemini.
+No HTTP. Persistence is handled by ``POST /models/answer-booklet`` when the model key was created with ``type=custom``.
 """
 
 from __future__ import annotations

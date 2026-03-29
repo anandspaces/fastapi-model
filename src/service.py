@@ -7,14 +7,27 @@ import uuid
 from src.database import get_conn
 
 
+def _normalize_booklet_type(raw: str) -> str:
+    t = (raw or "standard").strip().lower()
+    return t if t in ("standard", "custom") else "standard"
+
+
 def insert_key_upload(
-    key_id: str, title: str, lang: str, pdf_path: str, owner_user_id: str
+    key_id: str,
+    title: str,
+    lang: str,
+    pdf_path: str,
+    owner_user_id: str,
+    booklet_type: str = "standard",
 ) -> None:
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    bt = _normalize_booklet_type(booklet_type)
     with get_conn() as db:
         db.execute(
-            "INSERT INTO key_uploads (id, title, lang, pdf_path, created_at, owner_user_id) VALUES (?,?,?,?,?,?)",
-            (key_id, title, lang, pdf_path, created, owner_user_id),
+            """INSERT INTO key_uploads
+            (id, title, lang, pdf_path, created_at, owner_user_id, booklet_type)
+            VALUES (?,?,?,?,?,?,?)""",
+            (key_id, title, lang, pdf_path, created, owner_user_id, bt),
         )
         db.commit()
 
@@ -27,33 +40,46 @@ def get_key_upload(key_id: str, owner_user_id: str) -> dict | None:
         ).fetchone()
     if not row:
         return None
+    rdict = dict(row)
     return {
         "id": row["id"],
         "title": row["title"],
         "lang": row["lang"],
         "pdf_path": row["pdf_path"],
+        "booklet_type": rdict.get("booklet_type") or "standard",
     }
 
 
 def update_key_upload(
-    key_id: str, title: str, lang: str, owner_user_id: str
+    key_id: str,
+    title: str,
+    lang: str,
+    owner_user_id: str,
+    booklet_type: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Update title/lang in key_uploads and linked answer_models row (same id) if present."""
+    """Update title/lang (and optionally booklet_type) in key_uploads and answer_models if present."""
     with get_conn() as db:
-        existing = db.execute(
-            "SELECT 1 FROM key_uploads WHERE id = ? AND owner_user_id = ?",
+        row = db.execute(
+            "SELECT booklet_type FROM key_uploads WHERE id = ? AND owner_user_id = ?",
             (key_id, owner_user_id),
         ).fetchone()
-        if not existing:
+        if not row:
             return False, "Model key not found"
 
+        bt = (
+            _normalize_booklet_type(booklet_type)
+            if booklet_type is not None
+            else (dict(row).get("booklet_type") or "standard")
+        )
+
         db.execute(
-            "UPDATE key_uploads SET title = ?, lang = ? WHERE id = ? AND owner_user_id = ?",
-            (title, lang, key_id, owner_user_id),
+            "UPDATE key_uploads SET title = ?, lang = ?, booklet_type = ? WHERE id = ? AND owner_user_id = ?",
+            (title, lang, bt, key_id, owner_user_id),
         )
         db.execute(
-            "UPDATE answer_models SET title = ?, lang = ? WHERE id = ? AND owner_user_id = ?",
-            (title, lang, key_id, owner_user_id),
+            """UPDATE answer_models SET title = ?, lang = ?, booklet_type = ?
+               WHERE id = ? AND owner_user_id = ?""",
+            (title, lang, bt, key_id, owner_user_id),
         )
         db.commit()
     return True, None
@@ -99,16 +125,20 @@ def insert_answer_model(
     questions: list,
     booklet_pdf_path: str | None,
     owner_user_id: str,
+    booklet_type: str = "standard",
 ) -> None:
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     qjson = json.dumps(questions, ensure_ascii=False)
     n = len(questions)
+    bt = (booklet_type or "standard").strip().lower()
+    if bt not in ("standard", "custom"):
+        bt = "standard"
     with get_conn() as db:
         db.execute(
             """INSERT INTO answer_models
-            (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id)
-            VALUES (?,?,?,?,?,?,?,?)""",
-            (model_id, title, lang, qjson, n, booklet_pdf_path, created, owner_user_id),
+            (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id, booklet_type)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (model_id, title, lang, qjson, n, booklet_pdf_path, created, owner_user_id, bt),
         )
         db.commit()
 
@@ -122,6 +152,8 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
     if not row:
         return None
     questions = json.loads(row["questions_json"])
+    rdict = dict(row)
+    booklet_type = rdict.get("booklet_type") or "standard"
     return {
         "id": row["id"],
         "title": row["title"],
@@ -129,6 +161,7 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
         "question_count": row["question_count"],
         "questions": questions,
         "created_at": row["created_at"],
+        "booklet_type": str(booklet_type),
     }
 
 
@@ -142,7 +175,8 @@ def list_registered_models(owner_user_id: str) -> list[dict]:
         rows = db.execute(
             """
             SELECT k.id, k.title, k.lang,
-                   CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS has_booklet
+                   CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS has_booklet,
+                   COALESCE(a.booklet_type, k.booklet_type) AS booklet_type
             FROM key_uploads k
             LEFT JOIN answer_models a
               ON a.id = k.id AND a.owner_user_id = k.owner_user_id
@@ -158,6 +192,7 @@ def list_registered_models(owner_user_id: str) -> list[dict]:
             "title": r["title"],
             "lang": r["lang"],
             "has_booklet": bool(r["has_booklet"]),
+            "booklet_type": r["booklet_type"] if r["booklet_type"] is not None else None,
         }
         for r in rows
     ]

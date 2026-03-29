@@ -55,10 +55,26 @@ def init_db() -> None:
         if "owner_user_id" not in key_cols:
             db.execute("ALTER TABLE key_uploads ADD COLUMN owner_user_id TEXT")
 
+        key_cols = {
+            row["name"] for row in db.execute("PRAGMA table_info(key_uploads)").fetchall()
+        }
+        if "booklet_type" not in key_cols:
+            db.execute(
+                "ALTER TABLE key_uploads ADD COLUMN booklet_type TEXT NOT NULL DEFAULT 'standard'"
+            )
+
         answer_cols = {
             row["name"] for row in db.execute("PRAGMA table_info(answer_models)").fetchall()
         }
         if "owner_user_id" not in answer_cols:
             db.execute("ALTER TABLE answer_models ADD COLUMN owner_user_id TEXT")
+
+        answer_cols = {
+            row["name"] for row in db.execute("PRAGMA table_info(answer_models)").fetchall()
+        }
+        if "booklet_type" not in answer_cols:
+            db.execute(
+                "ALTER TABLE answer_models ADD COLUMN booklet_type TEXT NOT NULL DEFAULT 'standard'"
+            )
 
         db.commit()

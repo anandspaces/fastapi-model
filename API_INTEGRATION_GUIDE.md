@@ -130,6 +130,7 @@ Authorization: Bearer <accessToken>
 
 - `title` (string, required)
 - `lang` (string, required)
+- `type` (string, optional; default `standard`) — `standard` or `custom`. Stored on the key and used when you later call `POST /models/answer-booklet` for this `id` (no `type` field on answer-booklet).
 
 #### Success Response (`200`)
 
@@ -140,7 +141,8 @@ Authorization: Bearer <accessToken>
   "data": {
     "id": "uuid",
     "title": "Physics Unit Test",
-    "lang": "en"
+    "lang": "en",
+    "booklet_type": "standard"
   }
 }
 ```
@@ -157,9 +159,12 @@ Authorization: Bearer <accessToken>
 ```json
 {
   "title": "Updated title",
-  "lang": "en"
+  "lang": "en",
+  "booklet_type": "custom"
 }
 ```
+
+`booklet_type` is optional. If omitted, the existing value on the key is kept. If a booklet row already exists for this id, `answer_models.booklet_type` is updated to match.
 
 #### Success Response (`200`)
 
@@ -170,7 +175,8 @@ Authorization: Bearer <accessToken>
   "data": {
     "id": "uuid",
     "title": "Updated title",
-    "lang": "en"
+    "lang": "en",
+    "booklet_type": "custom"
   }
 }
 ```
@@ -198,15 +204,24 @@ Authorization: Bearer <accessToken>
 
 ### POST `/models/answer-booklet`
 
+Uploads a PDF for an existing model key. Processing mode (**standard** vs **custom**) is taken from the key’s stored `type` / `booklet_type` (set at `POST /models/key` or `PUT /models/key/{key_id}`), not from this request.
+
 - Content-Type: `multipart/form-data`
 - Auth required: Yes
 
 #### Request form fields
 
-- `id` (string, required; key id)
+- `id` (string, required; key id from `POST /models/key`)
 - `file` (PDF file, required)
 
+#### Booklet modes (from the key)
+
+- **`standard`** — Full booklet extraction via Gemini ([`process_pdf_path`](src/gemini_extract.py)): marks, page hints, diagrams metadata, etc.
+- **`custom`** — Import **questions** from the PDF, then **one Gemini call per question** for a model answer. Answer language follows the key’s `lang`.
+
 #### Success Response (`200`)
+
+Same envelope and `data` keys for both types:
 
 ```json
 {
@@ -214,12 +229,13 @@ Authorization: Bearer <accessToken>
   "message": "Answer booklet uploaded successfully",
   "data": {
     "id": "uuid",
+    "booklet_type": "standard",
     "questions": [
       {
         "id": "q-eng-001",
         "questionNo": "Q1",
         "title": "Question title",
-        "desc": "Answer description",
+        "desc": "Answer or model-answer text",
         "pageNum": 2,
         "marks": 8,
         "diagramDescriptions": []
@@ -229,42 +245,11 @@ Authorization: Bearer <accessToken>
 }
 ```
 
----
+When the key is `custom`, `data.booklet_type` is `"custom"`. Each question uses the same keys; typically `pageNum` is `1`, `marks` is `0`, and `desc` holds the generated model answer.
 
-### POST `/models/qna`
+#### No questions found (key `custom` only, `200` business failure)
 
-Imports **questions only** from an uploaded PDF (via Gemini), then calls Gemini **once per question** to generate a model/reference **answer**. Results are returned in the response body only; **nothing is persisted** in this phase (no UUID row, no follow-up GET for this flow).
-
-- Content-Type: `multipart/form-data`
-- Auth required: Yes
-
-#### Request form fields
-
-- `file` (PDF file, required)
-- `language` (string, optional; default `en`. Use `hi` for Hindi-oriented answers.)
-
-#### Success Response (`200`)
-
-```json
-{
-  "status": 1,
-  "message": "Questions imported and answered.",
-  "data": {
-    "questions": [
-      {
-        "question_id": "q-001",
-        "question_no": "Q1",
-        "question": "Full question text…",
-        "answer": "Model answer text…"
-      }
-    ]
-  }
-}
-```
-
-#### No questions found (`200`, business failure)
-
-When the PDF has no extractable exam-style questions:
+When the PDF has no extractable exam-style questions, nothing is persisted and the uploaded file is removed:
 
 ```json
 {
@@ -275,10 +260,6 @@ When the PDF has no extractable exam-style questions:
   }
 }
 ```
-
-#### Future work
-
-Persistence under a UUID and retrieval via `GET /models/{model_id}` (or a dedicated route) may be added later; clients should not rely on storage for this endpoint today.
 
 ---
 
@@ -299,12 +280,15 @@ Persistence under a UUID and retrieval via `GET /models/{model_id}` (or a dedica
         "id": "uuid",
         "title": "Model title",
         "lang": "en",
-        "has_booklet": true
+        "has_booklet": true,
+        "booklet_type": "standard"
       }
     ]
   }
 }
 ```
+
+`booklet_type` is `null` when `has_booklet` is false; otherwise `"standard"` or `"custom"`.
 
 ---
 
@@ -323,12 +307,15 @@ Persistence under a UUID and retrieval via `GET /models/{model_id}` (or a dedica
     "id": "uuid",
     "title": "Model title",
     "lang": "en",
+    "booklet_type": "standard",
     "question_count": 20,
     "questions": [],
     "created_at": "2026-03-23T00:00:00Z"
   }
 }
 ```
+
+Other APIs can branch on `booklet_type` when different behavior is needed for custom vs standard models.
 
 ---
 
@@ -623,10 +610,9 @@ Same structure as `/analyse/pages`.
 2. Store `accessToken`
 3. Attach bearer token for all protected routes
 4. For model workflow:
-   - `POST /models/key`
-   - `POST /models/answer-booklet`
+   - `POST /models/key` (sets `title`, `lang`, and optional `type` / booklet mode: `standard` or `custom`)
+   - `POST /models/answer-booklet` with `id` and `file` only (mode comes from the key)
    - manage via `GET/PUT/DELETE /models*` endpoints
-   - Optional one-shot (no DB): `POST /models/qna` — returns questions + Gemini answers in `data` only
 5. For AI checking workflow:
    - `POST /analyse/pages`
    - optionally `POST /analyse/cached-ocr`
@@ -641,7 +627,7 @@ Authorization: Bearer <accessToken>
 
 ### Timeout / Retry Suggestions (client)
 
-- Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /models/qna` can take several minutes (one model call per extracted question plus the import pass).
+- Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /models/answer-booklet` for a key with `type=custom` can take several minutes (one Gemini call per extracted question plus the import pass).
 - Retry on network failures and `5xx` with exponential backoff.
 - For `/analyse/intro-page`, treat `422` as a valid “not detected” business outcome.
 
@@ -663,7 +649,18 @@ curl -X POST "http://127.0.0.1:8000/auth/login" \
 curl -X POST "http://127.0.0.1:8000/models/key" \
   -H "Authorization: Bearer <token>" \
   -F "title=Physics Model" \
-  -F "lang=en"
+  -F "lang=en" \
+  -F "type=standard"
+```
+
+### Create key (custom QnA booklet)
+
+```bash
+curl -X POST "http://127.0.0.1:8000/models/key" \
+  -H "Authorization: Bearer <token>" \
+  -F "title=Physics Model" \
+  -F "lang=en" \
+  -F "type=custom"
 ```
 
 ### Upload booklet
