@@ -26,6 +26,7 @@ from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
+    add_answer_model_question,
     create_user,
     delete_answer_model_question,
     delete_model_key,
@@ -449,6 +450,32 @@ async def reorder_model_questions(
             id=model_id,
             question_count=len(arranged or []),
             questions=arranged or [],
+        )
+    )
+
+
+@app.post("/models/{model_id}/create-question")
+async def post_model_question(
+    request: Request, model_id: str, payload: QuestionPayload
+) -> JSONResponse:
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+
+    ok, reason, new_id, q_count = add_answer_model_question(
+        model_id, user["id"], payload.model_dump()
+    )
+    if not ok:
+        if reason == "Model not found":
+            return JSONResponse(_err(reason))
+        return JSONResponse(_err(reason or "Create failed"))
+
+    return JSONResponse(
+        _ok(
+            "Question created successfully",
+            id=model_id,
+            questionId=new_id,
+            question_count=q_count,
         )
     )
 

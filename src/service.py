@@ -1,10 +1,13 @@
 """SQLite persistence service for model keys and answer booklets."""
 
 import json
+import re
 import time
 import uuid
 
 from src.database import get_conn
+
+_Q_ENG_ID = re.compile(r"^q-eng-(\d+)$", re.I)
 
 
 def _normalize_booklet_type(raw: str) -> str:
@@ -213,6 +216,62 @@ def delete_answer_model(model_id: str, owner_user_id: str) -> tuple[bool, str | 
         )
         db.commit()
     return True, path
+
+
+def _next_q_eng_id(questions: list) -> str:
+    max_n = 0
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qid = q.get("id")
+        if not isinstance(qid, str):
+            continue
+        m = _Q_ENG_ID.match(qid.strip())
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"q-eng-{max_n + 1:03d}"
+
+
+def add_answer_model_question(
+    model_id: str,
+    owner_user_id: str,
+    fields: dict,
+) -> tuple[bool, str | None, str | None, int | None]:
+    """Append one question; assign next q-eng-NNN id; renumber questionNo to Q1..Qn.
+
+    Returns (ok, error, new_question_id, question_count).
+    """
+    with get_conn() as db:
+        row = db.execute(
+            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            (model_id, owner_user_id),
+        ).fetchone()
+        if not row:
+            return False, "Model not found", None, None
+
+        try:
+            questions = json.loads(row["questions_json"])
+        except Exception:
+            return False, "Invalid questions_json", None, None
+
+        if not isinstance(questions, list):
+            return False, "Invalid questions_json", None, None
+
+        new_id = _next_q_eng_id(questions)
+        new_obj = {**fields, "id": new_id}
+        questions.append(new_obj)
+
+        for i, q in enumerate(questions, 1):
+            if isinstance(q, dict):
+                q["questionNo"] = f"Q{i}"
+
+        qjson = json.dumps(questions, ensure_ascii=False)
+        db.execute(
+            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
+            (qjson, len(questions), model_id, owner_user_id),
+        )
+        db.commit()
+    return True, None, new_id, len(questions)
 
 
 def update_answer_model_question(

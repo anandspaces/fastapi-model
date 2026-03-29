@@ -338,6 +338,52 @@ Other APIs can branch on `booklet_type` when different behavior is needed for cu
 
 ## 4) Question Management APIs
 
+### POST `/models/{model_id}/create-question`
+
+- Content-Type: `application/json`
+- Auth required: Yes
+
+Creates a new question on an existing answer model. Requires **`POST /models/answer-booklet`** to have succeeded for this `model_id` first (otherwise `Model not found`).
+
+#### Request
+
+(no `id` in the body — the server assigns the next `q-eng-NNN` id):
+
+```json
+{
+  "questionNo": "Q1",
+  "title": "New question title",
+  "desc": "Full question / model answer text",
+  "pageNum": 1,
+  "marks": 5,
+  "diagramDescriptions": []
+}
+```
+
+- **`questionNo` in the body is overwritten** after create: every question’s `questionNo` is renumbered to `Q1`, `Q2`, … in array order (same behaviour as after deleting a question).
+- New **`id`**: next available `q-eng-001`, `q-eng-002`, … by scanning existing question ids matching `q-eng-` + three digits.
+
+#### Success Response (`200`)
+
+```json
+{
+  "status": 1,
+  "message": "Question created successfully",
+  "data": {
+    "id": "model_id",
+    "questionId": "q-eng-003",
+    "question_count": 3
+  }
+}
+```
+
+#### Error Response (`200`, `status: 0`)
+
+- No answer model for this id / user: `Model not found`.
+- Corrupt `questions_json`: `Invalid questions_json`.
+
+---
+
 ### PUT `/models/{model_id}/questions/{question_id}`
 
 - Content-Type: `application/json`
