@@ -18,7 +18,7 @@ _EXPAND_SCHEMA = types.Schema(
     properties={
         "answer": types.Schema(
             type=types.Type.STRING,
-            description="Full model answer for a marking key, meeting the requested length.",
+            description="Plain text only; no HTML. Full model answer for a marking key, meeting the requested length.",
         ),
         "diagramDescriptions": types.Schema(
             type=types.Type.ARRAY,
@@ -54,7 +54,9 @@ def _expand_prompt(
 {lang_note}
 Booklet type label (for context only; standard and custom use the same length rules): {answer_type}
 
-Target length for the "answer" field: approximately {n_words} words (within ~15%% is fine). Structure with clear paragraphs. Produce a complete model answer that would earn full marks: correct reasoning, key terms, and structure, based only on the exam question below.
+Target length for the "answer" field: approximately {n_words} words (within ~15%% is fine). Use plain text with normal paragraph breaks (blank lines). Do not use HTML or XML tags such as <p>, </p>, <br>, or similar in the "answer" field.
+
+Produce a complete model answer that would earn full marks: correct reasoning, key terms, and structure, based only on the exam question below.
 
 For "diagramDescriptions": return a JSON array of strings. If the question requires one or more diagrams, sketches, graphs, maps, flowcharts, or labeled figures, add one short marking-key description per distinct diagram (what to draw, labels, axes, key features). If no diagram is appropriate, return an empty array [].
 
@@ -62,6 +64,18 @@ Question:
 {question.strip()}
 
 Respond ONLY with JSON matching the schema: one object with keys "answer" (string) and "diagramDescriptions" (array of strings)."""
+
+
+def _strip_html_p_tags(text: str) -> str:
+    """Remove <p>...</p> wrappers; keep paragraph breaks as blank lines."""
+    if not text:
+        return text
+    t = text
+    t = re.sub(r"</p\s*>", "\n\n", t, flags=re.I)
+    t = re.sub(r"<p\b[^>]*>", "", t, flags=re.I)
+    t = re.sub(r"<p\s*/\s*>", "", t, flags=re.I)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
 
 def _normalize_diagram_descriptions(raw: object) -> list[str]:
@@ -134,6 +148,7 @@ def expand_model_answer(
         raise RuntimeError("Gemini returned no text.")
     try:
         answer, diagram_descs = _parse_expand_json(raw)
+        answer = _strip_html_p_tags(answer)
     except (json.JSONDecodeError, ValueError):
         log.exception(
             "expand_model_answer: failed to parse model JSON (raw_len=%d)",
