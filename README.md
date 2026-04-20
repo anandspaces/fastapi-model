@@ -60,8 +60,8 @@ Data: `data/` at repo root (DB + uploads).
 
 - `POST /auth/signup` — JSON: `username`, `password`
 - `POST /auth/login` — JSON: `username`, `password` -> token data (`accessToken`, `tokenType`, `expiresIn`)
-- `POST /models/key` — multipart: `title`, `lang`, optional `type` (`standard` \| `custom` \| `essay`; drives `POST /models/answer-booklet` processing for that id; `essay` uses the same PDF path as `custom` with longer generated answers)
-- `PUT /models/key/{key_id}` — update model key metadata (`title`, `lang`, optional `booklet_type`: `standard` \| `custom` \| `essay`)
+- `POST /models/key` — multipart: `title`, `lang`, optional `type` (`standard` \| `custom` \| `custom_with_model` \| `essay`; drives `POST /models/answer-booklet` processing for that id; `custom_with_model` matches `custom`; `essay` uses the same PDF path as `custom` with longer generated answers)
+- `PUT /models/key/{key_id}` — update model key metadata (`title`, `lang`, optional `booklet_type`: `standard` \| `custom` \| `custom_with_model` \| `essay`)
 - `DELETE /models/key/{key_id}` — delete model key (and linked answer model if present)
 - `POST /models/answer-booklet` — multipart: `id`, `file` (PDF); booklet mode comes from the key’s `type` set at `POST /models/key`
 - `GET /models` — every key-registered id: `{ id, title, lang, has_booklet, booklet_type }[]` (`booklet_type` null until booklet exists)

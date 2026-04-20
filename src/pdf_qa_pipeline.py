@@ -1,6 +1,6 @@
 """Orchestrate: PDF → import questions → Gemini answers per question.
 
-No HTTP. Persistence is handled by ``POST /models/answer-booklet`` when the model key was created with ``type=custom`` or ``type=essay`` (same PDF path; essay uses longer generated answers).
+No HTTP. Persistence is handled by ``POST /models/answer-booklet`` when the model key was created with ``type=custom``, ``type=custom_with_model``, or ``type=essay`` (same PDF path; essay uses longer generated answers).
 """
 
 from __future__ import annotations

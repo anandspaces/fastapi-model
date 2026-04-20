@@ -306,7 +306,9 @@ async def post_model_key(
     bt_raw = (booklet_type_param or "standard").strip().lower()
     if bt_raw not in BOOKLET_TYPES:
         return JSONResponse(
-            _err('type must be "standard", "custom", or "essay".')
+            _err(
+                'type must be "standard", "custom", "custom_with_model", or "essay".'
+            )
         )
     key_id = str(uuid.uuid4())
     dest = UPLOADS_DIR / f"key_{key_id}.pdf"
@@ -351,7 +353,9 @@ async def put_model_key(
             vv = str(v).strip().lower()
             if vv not in BOOKLET_TYPES:
                 return JSONResponse(
-                    _err('booklet_type must be "standard", "custom", or "essay".')
+                    _err(
+                        'booklet_type must be "standard", "custom", "custom_with_model", or "essay".'
+                    )
                 )
             update_kw["booklet_type"] = vv
 
@@ -691,14 +695,16 @@ async def post_model_answer_expand(
     if not _valid_lang(lang):
         return JSONResponse(_err("language must be en or hi"))
     bt = payload.type.strip().lower()
-    if bt not in ("standard", "custom", "essay"):
+    if bt not in ("standard", "custom", "custom_with_model", "essay"):
         log.info(
             "model-answer/expand rejected invalid type=%r user_id=%s",
             payload.type.strip(),
             user.get("id"),
         )
         return JSONResponse(
-            _err('type must be "standard", "custom", or "essay".')
+            _err(
+                'type must be "standard", "custom", "custom_with_model", or "essay".'
+            )
         )
     try:
         api_key = load_api_key()

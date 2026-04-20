@@ -130,7 +130,7 @@ Authorization: Bearer <accessToken>
 
 - `title` (string, required)
 - `lang` (string, required)
-- `type` (string, optional; default `standard`) — `standard`, `custom`, or `essay`. Stored on the key and used when you later call `POST /models/answer-booklet` for this `id` (no `type` field on answer-booklet). `essay` uses the same PDF pipeline as `custom` but generates longer model answers per question.
+- `type` (string, optional; default `standard`) — `standard`, `custom`, `custom_with_model`, or `essay`. Stored on the key and used when you later call `POST /models/answer-booklet` for this `id` (no `type` field on answer-booklet). `custom_with_model` uses the same PDF pipeline and answer generation as `custom` (distinct label for clients). `essay` uses the same PDF pipeline as `custom` but generates longer model answers per question.
 
 #### Success Response (`200`)
 
@@ -164,7 +164,7 @@ Authorization: Bearer <accessToken>
 }
 ```
 
-`booklet_type` is optional. Allowed values: `standard`, `custom`, or `essay`. If omitted, the existing value on the key is kept. If a booklet row already exists for this id, `answer_models.booklet_type` is updated to match.
+`booklet_type` is optional. Allowed values: `standard`, `custom`, `custom_with_model`, or `essay`. If omitted, the existing value on the key is kept. If a booklet row already exists for this id, `answer_models.booklet_type` is updated to match.
 
 #### Success Response (`200`)
 
@@ -204,7 +204,7 @@ Authorization: Bearer <accessToken>
 
 ### POST `/models/answer-booklet`
 
-Uploads a PDF for an existing model key. Processing mode (**standard** vs **custom** / **essay**) is taken from the key’s stored `type` / `booklet_type` (set at `POST /models/key` or `PUT /models/key/{key_id}`), not from this request.
+Uploads a PDF for an existing model key. Processing mode (**standard** vs **custom** / **custom_with_model** / **essay**) is taken from the key’s stored `type` / `booklet_type` (set at `POST /models/key` or `PUT /models/key/{key_id}`), not from this request.
 
 If an `answer_models` row already exists for this id (for example you used **`POST /models/{model_id}/create_question`** first), this endpoint **updates** it: **`questions` in the database are replaced** by whatever the PDF pipeline extracts, and the booklet file path is set.
 
@@ -220,6 +220,7 @@ If an `answer_models` row already exists for this id (for example you used **`PO
 
 - **`standard`** — Full booklet extraction via Gemini ([`process_pdf_path`](src/gemini_extract.py)): marks, page hints, diagrams metadata, etc.
 - **`custom`** — Import **questions** from the PDF, then **one Gemini call per question** for a concise model answer. Answer language follows the key’s `lang`.
+- **`custom_with_model`** — Same import and per-question flow as **`custom`** (stored `booklet_type` differs for client routing only).
 - **`essay`** — Same import and per-question flow as **`custom`**, but each generated answer targets an extended response (roughly essay length; see [`src/gemini_question_answers.py`](src/gemini_question_answers.py)).
 
 #### Success Response (`200`)
@@ -248,11 +249,11 @@ Same envelope and `data` keys for all booklet modes:
 }
 ```
 
-When the key is `custom` or `essay`, `data.booklet_type` is that value. Each question uses the same keys; typically `pageNum` is `1`, `marks` is `0`, and `desc` holds the generated model answer.
+When the key is `custom`, `custom_with_model`, or `essay`, `data.booklet_type` is that value. Each question uses the same keys; typically `pageNum` is `1`, `marks` is `0`, and `desc` holds the generated model answer.
 
-**Question order (`custom` / `essay`):** Questions may appear on the PDF in any layout order (e.g. Q1, then Q5, then Q7). The server asks Gemini to return them in **ascending logical question order** and then **re-sorts** by printed `questionNo` as a safety net. Internal `id` values are `q-001`, `q-002`, … in that sorted order; `questionNo` stays as printed (e.g. `"Q5"` is not renamed).
+**Question order (`custom` / `custom_with_model` / `essay`):** Questions may appear on the PDF in any layout order (e.g. Q1, then Q5, then Q7). The server asks Gemini to return them in **ascending logical question order** and then **re-sorts** by printed `questionNo` as a safety net. Internal `id` values are `q-001`, `q-002`, … in that sorted order; `questionNo` stays as printed (e.g. `"Q5"` is not renamed).
 
-#### No questions found (key `custom` or `essay`, `200` business failure)
+#### No questions found (key `custom`, `custom_with_model`, or `essay`, `200` business failure)
 
 When the PDF has no extractable exam-style questions, nothing is persisted and the uploaded file is removed:
 
@@ -293,7 +294,7 @@ When the PDF has no extractable exam-style questions, nothing is persisted and t
 }
 ```
 
-When `has_booklet` is false, `booklet_type` is `null`. Otherwise it is `"standard"`, `"custom"`, or `"essay"`.
+When `has_booklet` is false, `booklet_type` is `null`. Otherwise it is `"standard"`, `"custom"`, `"custom_with_model"`, or `"essay"`.
 
 ---
 
@@ -320,7 +321,7 @@ When `has_booklet` is false, `booklet_type` is `null`. Otherwise it is `"standar
 }
 ```
 
-Other APIs can branch on `booklet_type` when different behavior is needed for standard vs custom vs essay models.
+Other APIs can branch on `booklet_type` when different behavior is needed for standard vs custom vs custom_with_model vs essay models.
 
 ---
 
@@ -522,7 +523,7 @@ JSON field names use **camelCase**, consistent with question objects elsewhere (
 
 ## 5) Model answer expansion (stateless)
 
-Generates a full examiner-style model answer from the **question text only** using Gemini (no user draft). **Nothing is stored** in the database. This endpoint’s `type` field is **only** for answer length (`standard` / `custom` ≈ 300 words, `essay` ≈ 1200 words). Booklet keys use the same three values on `POST /models/key` / `PUT /models/key/{key_id}` to drive **stored** models and `POST /models/answer-booklet` processing; `POST /model/answer-expand` does not read the database and only uses `type` for length.
+Generates a full examiner-style model answer from the **question text only** using Gemini (no user draft). **Nothing is stored** in the database. This endpoint’s `type` field is **only** for answer length (`standard` / `custom` / `custom_with_model` ≈ 300 words, `essay` ≈ 1200 words). Booklet keys use the same values on `POST /models/key` / `PUT /models/key/{key_id}` to drive **stored** models and `POST /models/answer-booklet` processing; `POST /model/answer-expand` does not read the database and only uses `type` for length.
 
 Response `diagramDescriptions` uses the same camelCase array shape as question objects elsewhere (`diagramDescriptions` on each question).
 
@@ -539,7 +540,7 @@ Implementation reference: [`src/gemini_expand_model_answer.py`](src/gemini_expan
 
 | Field | Type | Required | Notes |
 |--------|------|----------|--------|
-| `type` | string | Yes | `standard`, `custom`, or `essay` (case-insensitive after trim). `standard` and `custom` use the same target length (~300 words). `essay` uses ~1200 words. |
+| `type` | string | Yes | `standard`, `custom`, `custom_with_model`, or `essay` (case-insensitive after trim). `standard`, `custom`, and `custom_with_model` use the same target length (~300 words). `essay` uses ~1200 words. |
 | `question` | string | Yes | Exam question text (non-empty). |
 | `language` | string | No | Default `en`. Must be `en` or `hi` when provided. |
 
@@ -569,7 +570,7 @@ If no diagram is appropriate, `diagramDescriptions` is `[]`.
 ```json
 {
   "status": 0,
-  "message": "type must be \"standard\", \"custom\", or \"essay\".",
+  "message": "type must be \"standard\", \"custom\", \"custom_with_model\", or \"essay\".",
   "data": {}
 }
 ```
@@ -875,10 +876,10 @@ Same structure as `/analyse/pages`.
 2. Store `accessToken`
 3. Attach bearer token for all protected routes
 4. For model workflow:
-   - `POST /models/key` (sets `title`, `lang`, and optional `type` / booklet mode: `standard`, `custom`, or `essay`)
+   - `POST /models/key` (sets `title`, `lang`, and optional `type` / booklet mode: `standard`, `custom`, `custom_with_model`, or `essay`)
    - `POST /models/answer-booklet` with `id` and `file` only (mode comes from the key)
    - manage via `GET/PUT/DELETE /models*` endpoints
-   - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `essay` for length — see section 5)
+   - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `custom_with_model` / `essay` for length — see section 5)
 5. For AI checking workflow:
    - `POST /analyse/pages`
    - optional `POST /analyse/copy-ocr` or `POST /analyse/copy-ocr-rasterization` (essay PDF → plain `text` + `pageCount`, no DB; rasterization = per-page parallel OCR)
@@ -895,7 +896,7 @@ Authorization: Bearer <accessToken>
 ### Timeout / Retry Suggestions (client)
 
 - Use longer timeout for AI endpoints (60-180s depending on image/page count). `POST /analyse/copy-ocr` for multi-page PDFs: prefer **60–180s**. `POST /analyse/copy-ocr-rasterization` with many pages: prefer the **upper end** or higher (multiple sequential Gemini waves).
-- `POST /models/answer-booklet` for a key with `type=custom` or `type=essay` can take several minutes (one Gemini call per extracted question plus the import pass; `essay` answers are longer to generate).
+- `POST /models/answer-booklet` for a key with `type=custom`, `type=custom_with_model`, or `type=essay` can take several minutes (one Gemini call per extracted question plus the import pass; `essay` answers are longer to generate).
 - `POST /model/answer-expand`: allow at least **60–180s**; prefer the upper end when `type` is `essay`.
 - Retry on network failures and `5xx` with exponential backoff.
 - For `/analyse/intro-page`, treat `422` as a valid “not detected” business outcome.

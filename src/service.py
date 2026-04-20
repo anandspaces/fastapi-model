@@ -9,7 +9,7 @@ from src.database import get_conn
 
 _Q_ENG_ID = re.compile(r"^q-eng-(\d+)$", re.I)
 
-BOOKLET_TYPES = frozenset({"standard", "custom", "essay"})
+BOOKLET_TYPES = frozenset({"standard", "custom", "custom_with_model", "essay"})
 
 
 def _normalize_booklet_type(raw: str) -> str:

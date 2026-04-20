@@ -119,11 +119,11 @@ def extract_questions_from_pdf(
 
     Returns an empty list when the model finds no questions.
 
-    For ``booklet_type`` ``custom`` or ``essay``, the prompt asks Gemini to output
+    For ``booklet_type`` ``custom``, ``custom_with_model``, or ``essay``, the prompt asks Gemini to output
     questions in logical order and the server re-sorts by ``questionNo`` as a safety net.
     """
     bt = (booklet_type or "custom").strip().lower()
-    use_booklet_order = bt in ("custom", "essay")
+    use_booklet_order = bt in ("custom", "custom_with_model", "essay")
     prompt = (
         _QUESTIONS_ONLY_PROMPT_BOOKLET_ORDERED
         if use_booklet_order

@@ -140,7 +140,7 @@ def fill_answers_for_questions(
 ) -> list[dict[str, str]]:
     """For each imported row (id, questionNo, question_text), append Gemini ``answer``.
 
-    *booklet_type* ``essay`` requests long-form model answers; ``custom`` (default) uses concise answers.
+    *booklet_type* ``essay`` requests long-form model answers; ``custom`` and ``custom_with_model`` use concise answers (same generation rules).
 
     Runs up to ``_ANSWER_PARALLEL_WORKERS`` answer requests in parallel (I/O-bound).
     Result order matches *questions*.
