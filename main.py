@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import jwt
@@ -90,7 +91,59 @@ app = FastAPI(
     title="PDF model keys & answer booklets",
     version="0.1.0",
     lifespan=lifespan,
+    swagger_ui_parameters={
+        "persistAuthorization": True,
+        "displayRequestDuration": True,
+    },
 )
+
+
+_PUBLIC_OPENAPI_ROUTES = frozenset(
+    {
+        ("GET", "/"),
+        ("POST", "/auth/signup"),
+        ("POST", "/auth/login"),
+    }
+)
+
+
+def custom_openapi() -> dict:
+    """Expose JWT Bearer in OpenAPI so Swagger /docs Authorize sends the header."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=getattr(app, "version", "0.1.0"),
+        openapi_version=app.openapi_version,
+        description=getattr(app, "description", None),
+        routes=app.routes,
+    )
+    openapi_schema.setdefault("components", {}).setdefault("securitySchemes", {})[
+        "HTTPBearer"
+    ] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": (
+            "JWT from POST /auth/login response data.accessToken. "
+            "Paste only the token string; Swagger adds the Bearer prefix."
+        ),
+    }
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if method.lower() not in ("get", "post", "put", "delete", "patch"):
+                continue
+            if not isinstance(operation, dict):
+                continue
+            route_key = (method.upper(), path)
+            if route_key in _PUBLIC_OPENAPI_ROUTES:
+                continue
+            operation["security"] = [{"HTTPBearer": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]
 
 app.add_middleware(
     CORSMiddleware,
