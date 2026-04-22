@@ -29,6 +29,7 @@ from src.gemini_copy_ocr import (
     ocr_essay_copy_pdf,
     ocr_essay_copy_pdf_rasterized,
 )
+from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
@@ -235,11 +236,13 @@ def _require_auth_user(request: Request) -> tuple[dict | None, JSONResponse | No
 
 @app.get("/")
 async def get_root() -> JSONResponse:
+    """Health check endpoint that confirms the API service is running."""
     return JSONResponse("API is running successfully!")
 
 
 @app.post("/auth/signup")
 async def auth_signup(payload: AuthRequest) -> JSONResponse:
+    """Creates a user account and returns an authentication token."""
     username = payload.username.strip()
     password = payload.password
     if not username or not password:
@@ -267,6 +270,7 @@ async def auth_signup(payload: AuthRequest) -> JSONResponse:
 
 @app.post("/auth/login")
 async def auth_login(payload: AuthRequest) -> JSONResponse:
+    """Validates credentials and issues an authentication token."""
     username = payload.username.strip()
     password = payload.password
     if not username or not password:
@@ -297,6 +301,7 @@ async def post_model_key(
     lang: str = Form(...),
     booklet_type_param: str = Form("standard", alias="type"),
 ) -> JSONResponse:
+    """Creates a model key record and stores key metadata for the user."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -334,6 +339,7 @@ async def post_model_key(
 async def put_model_key(
     request: Request, key_id: str, payload: ModelKeyPayload
 ) -> JSONResponse:
+    """Updates key metadata such as title, language, and booklet type."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -378,6 +384,7 @@ async def put_model_key(
 
 @app.delete("/models/key/{key_id}")
 async def delete_key(request: Request, key_id: str) -> JSONResponse:
+    """Deletes a model key record and removes related stored PDF files."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -401,6 +408,7 @@ async def post_answer_booklet(
     id: str = Form(...),
     file: UploadFile = File(...),
 ) -> JSONResponse:
+    """Uploads a booklet PDF, extracts questions, and saves model data."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -481,6 +489,7 @@ async def post_answer_booklet(
 
 @app.get("/models/{model_id}")
 async def get_model(request: Request, model_id: str) -> JSONResponse:
+    """Returns a single stored model with all question details."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -492,6 +501,7 @@ async def get_model(request: Request, model_id: str) -> JSONResponse:
 
 @app.get("/models")
 async def list_models(request: Request) -> JSONResponse:
+    """Lists all models that belong to the authenticated user."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -503,6 +513,7 @@ async def list_models(request: Request) -> JSONResponse:
 async def reorder_model_questions(
     request: Request, model_id: str, payload: ReorderQuestionsPayload
 ) -> JSONResponse:
+    """Reorders model questions according to the provided question ID order."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -537,6 +548,7 @@ def _question_payload_log_dict(payload: QuestionPayload) -> dict[str, object]:
 async def post_model_question(
     request: Request, model_id: str, payload: QuestionPayload
 ) -> JSONResponse:
+    """Creates a new question and appends it to an existing model."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -580,6 +592,7 @@ async def post_model_question(
 async def put_model_question(
     request: Request, model_id: str, question_id: str, payload: QuestionPayload
 ) -> JSONResponse:
+    """Updates an existing question's content and scoring information."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -599,6 +612,7 @@ async def put_model_question(
 async def put_questions_bulk_page_marks(
     request: Request, payload: BulkQuestionPageMarksPayload
 ) -> JSONResponse:
+    """Bulk updates page numbers and marks for multiple model questions."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -648,6 +662,7 @@ async def put_questions_bulk_page_marks(
 async def delete_model_question(
     request: Request, model_id: str, question_id: str
 ) -> JSONResponse:
+    """Deletes one question from the specified model."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -669,6 +684,7 @@ async def delete_model_question(
 
 @app.delete("/models/{model_id}")
 async def delete_model(request: Request, model_id: str) -> JSONResponse:
+    """Deletes a model and removes its associated stored PDF file."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -688,6 +704,7 @@ def _valid_lang(code: str) -> bool:
 async def post_model_answer_expand(
     request: Request, payload: ExpandModelAnswerRequest
 ) -> JSONResponse:
+    """Expands a model answer using AI and returns enriched response text."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -758,6 +775,7 @@ async def post_analyse_pages(
     total_marks: int = Form(...),
     language: str = Form(...),
 ) -> JSONResponse:
+    """Analyses uploaded pages against model criteria and returns scoring."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -802,6 +820,7 @@ async def post_analyse_copy_ocr(
     file: UploadFile = File(...),
     language: str = Form("en"),
 ) -> JSONResponse:
+    """Extracts OCR text from a PDF copy using direct PDF processing."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -882,6 +901,7 @@ async def post_analyse_copy_ocr_rasterization(
     file: UploadFile = File(...),
     language: str = Form("en"),
 ) -> JSONResponse:
+    """Extracts OCR text from a PDF after rasterizing pages to images."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -962,10 +982,95 @@ async def post_analyse_copy_ocr_rasterization(
     )
 
 
+@app.post("/analyse/smart-ocr")
+async def post_analyse_smart_ocr(
+    request: Request,
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+) -> JSONResponse:
+    """Extracts question-wise answers and marking coordinates from a PDF."""
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    lang = language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    if not _is_pdf(file.filename, file.content_type):
+        return JSONResponse(_err("file must be a PDF."))
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(_err("file is empty."))
+    max_bytes = copy_ocr_max_bytes()
+    if len(raw) > max_bytes:
+        return JSONResponse(
+            _err(
+                f"PDF exceeds maximum size ({max_bytes} bytes). "
+                "Reduce the file or raise COPY_OCR_MAX_BYTES."
+            )
+        )
+    if not raw.startswith(b"%PDF"):
+        return JSONResponse(_err("file does not look like a valid PDF."))
+
+    rid = str(uuid.uuid4())
+    log.info(
+        "analyse/smart-ocr start request_id=%s user_id=%s filename=%r bytes=%s",
+        rid,
+        user.get("id"),
+        file.filename,
+        len(raw),
+    )
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+
+    tmp: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw)
+        result = await asyncio.to_thread(
+            smart_ocr_extract_student_answers,
+            tmp,
+            api_key,
+            lang,
+            request_id=rid,
+        )
+    except ValueError as e:
+        log.warning("analyse/smart-ocr rejected request_id=%s: %s", rid, e)
+        return JSONResponse(_err(str(e)))
+    except Exception as e:
+        log.exception("analyse/smart-ocr failed request_id=%s", rid)
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                log.warning("analyse/smart-ocr temp unlink failed path=%s", tmp)
+
+    items = result.get("items", [])
+    log.info(
+        "analyse/smart-ocr ok request_id=%s page_count=%s item_count=%s",
+        rid,
+        result.get("page_count"),
+        len(items) if isinstance(items, list) else 0,
+    )
+    return JSONResponse(
+        _ok(
+            "Smart OCR complete.",
+            pageCount=result["page_count"],
+            items=result["items"],
+        )
+    )
+
+
 @app.post("/analyse/cached-ocr")
 async def post_analyse_cached_ocr(
     request: Request, payload: CachedOcrRequest
 ) -> JSONResponse:
+    """Analyses cached OCR text and returns scoring and feedback details."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -998,6 +1103,7 @@ async def post_analyse_cached_ocr(
 async def post_combined_review(
     request: Request, payload: CombinedReviewRequest
 ) -> JSONResponse:
+    """Combines question-level analysis results into one final review."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -1019,6 +1125,7 @@ async def post_combined_review(
 async def post_analyse_intro_page(
     request: Request, page: UploadFile = File(...)
 ) -> JSONResponse:
+    """Parses intro page content to extract student and exam metadata."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
