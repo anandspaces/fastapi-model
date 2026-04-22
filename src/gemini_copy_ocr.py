@@ -265,36 +265,91 @@ Rules:
 Respond ONLY with JSON matching the schema: one object with key "text" (string)."""
 
 
+def _rasterize_pdf_page_task(args: tuple[Path, int, float, str]) -> tuple[int, bytes]:
+    """Render one PDF page to PNG in its own process thread (opens its own document handle)."""
+    import fitz
+
+    pdf_path, page_index, scale, rid = args
+    doc = fitz.open(str(pdf_path))
+    try:
+        page = doc.load_page(page_index)
+        mat = fitz.Matrix(scale, scale)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        png = pix.tobytes("png")
+        log.debug(
+            "copy_ocr_raster[%s] raster page %s png_bytes=%s",
+            rid,
+            page_index + 1,
+            len(png),
+        )
+        return page_index, png
+    finally:
+        doc.close()
+
+
 def rasterize_pdf_to_png_pages(pdf_path: Path, dpi: int, request_id: str) -> list[bytes]:
-    """Render each PDF page to PNG bytes (RGB, no alpha)."""
+    """Render each PDF page to PNG bytes (RGB, no alpha).
+
+    Uses :func:`copy_ocr_parallel_workers` threads to rasterize pages in parallel when
+    there is more than one page (single-page PDFs stay sequential to avoid pool overhead).
+    """
     import fitz
 
     rid = request_id
-    log.info("copy_ocr_raster[%s] rasterize start path=%s dpi=%s", rid, pdf_path.name, dpi)
+    log.info(
+        "copy_ocr_raster[%s] rasterize start path=%s dpi=%s",
+        rid,
+        pdf_path.name,
+        dpi,
+    )
     t0 = time.monotonic()
-    doc = fitz.open(pdf_path)
+    doc = fitz.open(str(pdf_path))
     try:
-        if doc.page_count < 1:
+        n = doc.page_count
+        if n < 1:
             raise ValueError("PDF has no pages.")
-        scale = dpi / 72.0
-        mat = fitz.Matrix(scale, scale)
-        out: list[bytes] = []
-        for i in range(doc.page_count):
-            page = doc.load_page(i)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            out.append(pix.tobytes("png"))
-            log.debug(
-                "copy_ocr_raster[%s] raster page %s png_bytes=%s",
-                rid,
-                i + 1,
-                len(out[-1]),
-            )
     finally:
         doc.close()
+
+    scale = dpi / 72.0
+    workers_cfg = copy_ocr_parallel_workers()
+    pool_workers = max(1, min(workers_cfg, n))
+
+    if n == 1 or pool_workers == 1:
+        doc2 = fitz.open(str(pdf_path))
+        try:
+            mat = fitz.Matrix(scale, scale)
+            out: list[bytes] = []
+            for i in range(n):
+                page = doc2.load_page(i)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                out.append(pix.tobytes("png"))
+                log.debug(
+                    "copy_ocr_raster[%s] raster page %s png_bytes=%s",
+                    rid,
+                    i + 1,
+                    len(out[-1]),
+                )
+        finally:
+            doc2.close()
+    else:
+        tasks = [(pdf_path, i, scale, rid) for i in range(n)]
+        log.info(
+            "copy_ocr_raster[%s] parallel raster workers=%s pages=%s",
+            rid,
+            pool_workers,
+            n,
+        )
+        with ThreadPoolExecutor(max_workers=pool_workers) as executor:
+            indexed = list(executor.map(_rasterize_pdf_page_task, tasks))
+        indexed.sort(key=lambda x: x[0])
+        out = [png for _, png in indexed]
+
     log.info(
-        "copy_ocr_raster[%s] rasterize done pages=%s elapsed_s=%.3f",
+        "copy_ocr_raster[%s] rasterize done pages=%s workers=%s elapsed_s=%.3f",
         rid,
         len(out),
+        pool_workers,
         time.monotonic() - t0,
     )
     return out
