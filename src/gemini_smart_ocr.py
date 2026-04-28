@@ -595,16 +595,57 @@ Input is JSON with this shape:
 where page numbers are physical page numbers 1..{total_pages}.
 
 TASK:
-1. Read pages in order and match each question with its corresponding answer in sequence (question1-answer1, question2-answer2, ...).
-2. Group questions into sections (e.g. वाक्य शुद्धि, वाक्य प्रयोग, विलोम, उपसर्ग/प्रत्यय) using section_name in Hindi or short English when needed.
-3. For each student question: question text/label, full student_answer from OCR (do not shorten), answer_type: correction | paragraph | word_list,
-   and layout fields: start_page, start_y_position_percent, end_page, end_y_position_percent, marking_page, marking_x_position_percent, marking_y_position_percent (0–100, page numbers 1..{total_pages}).
+1. Read pages in order and identify TOP-LEVEL questions only.
+   A top-level question is introduced by a label like:
+     Q1, Q:2, Que:3, Que 4, Q.5, प्रश्न 1, (1), etc.
 
-4. Include questions that appear in the OCR but have no written answer below them (blank page, placeholder like "Ans:-" only with nothing after, etc.): still emit one row with student_answer exactly "" matching that question stem; do NOT omit unattempted items.
+   CRITICAL — DO NOT split these into separate items:
+   - Sub-parts of a case study (labeled 1. 2. 3. or (a)(b)(c) under the same Que: N)
+   - Continuation of an answer on the next page
+   - Numbered points within an answer
+
+   A new top-level question starts ONLY when a new Que/Q/प्रश्न label appears
+   that is at the SAME level as the main question headers, NOT when a
+   numbered sub-part (1. / 2. / 3.) appears inside a question or its answer.
+
+2. For case study questions with sub-parts (e.g. "Questions:- 1. ... 2. ... 3. ..."):
+   - Treat the entire case study as ONE item.
+   - student_answer must include ALL sub-part answers concatenated in order.
+   - question must include the full case study stem AND all sub-part labels.
+
+3. Group questions into sections using section_name in Hindi or short English.
+
+4. For each question emit:
+   - question_id: sequential integer (1, 2, 3 ...)
+   - question: full question text including any sub-part labels
+   - student_answer: complete answer text, joining sub-part answers with \\n\\n
+   - answer_type: correction | paragraph | word_list
+   - start_page, start_y_position_percent: where the question label appears
+   - end_page, end_y_position_percent: where the answer ends
+   - marking_page, marking_x_position_percent, marking_y_position_percent (0–100, page numbers 1..{total_pages})
+
+5. Include questions with no answer written (blank page, "Ans:-" with nothing after):
+   emit one row with student_answer exactly "" — do NOT omit unanswered items.
 
 {lang_note}
 {expected_hint}
-CRITICAL: Extract every question from the OCR in order through the last page, including unanswered ones. If you omit visible question stems without answers, output is incomplete.
+
+CRITICAL: Extract every top-level question from the OCR in order through the last page, including unanswered ones. Do not emit extra items for sub-parts of a single case study.
+
+WORKED EXAMPLE of case study grouping:
+  OCR contains:
+    "Que:9 You are a young IAS officer... public image.
+     Questions:-
+     1. Should there be ethical boundaries...?
+     2. How will you handle the situation?
+     3. What things should public servant keep in mind?"
+
+  CORRECT — emit ONE item:
+    question_id: 9
+    question: "Que:9 You are a young IAS officer... Questions:- 1. Should there be... 2. How will you... 3. What things..."
+    student_answer: "<answer to 1>\\n\\n<answer to 2>\\n\\n<answer to 3>"
+
+  WRONG — do NOT emit three separate items with question_ids 9, 10, 11.
 
 CRITICAL JSON:
 - Valid JSON only. Use \\n inside strings, never raw newlines inside JSON strings.
