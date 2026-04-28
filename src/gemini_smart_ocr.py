@@ -138,39 +138,43 @@ def _build_ocr_prompt_generic(page_num: int, total_pages: int, language: str) ->
         if lang == "hi"
         else "Preserve English and Hindi exactly — do NOT transliterate."
     )
-    return f"""Expert OCR for handwritten exam page {page_num} of {total_pages}.
+    return f"""You are performing OCR for page {page_num} of {total_pages} from a handwritten exam copy.
 
-Transcribe ALL visible text. Preserve layout with blank lines between sections.
-Question labels (Q1, (1), उत्तर:, etc.) on their own lines. [DIAGRAM] for unreadable figures.
-Tables: use " | " between cells. No markdown fences. {script_note}
+Transcribe ALL visible text on this page exactly as written.
+- Preserve line breaks and paragraph breaks.
+- Keep question labels like Q1, (1), प्रश्न 1, उत्तर exactly.
+- Do not translate or transliterate text.
+- For tables/lists, keep one row per line; use " | " between cells when needed.
+- If a word is unreadable, use [illegible] only for that span.
+- Do not invent, summarize, or correct content.
 
-Output ONLY plain text for this page."""
+{script_note}
+
+Return ONLY valid JSON:
+{{"text":"full page transcript with \\n for line breaks"}}"""
 
 
 def _build_ocr_prompt_correction(page_num: int, total_pages: int, language: str) -> str:
     base = _build_ocr_prompt_generic(page_num, total_pages, language)
     return f"""{base}
 
-FOCUS (CORRECTION style): Prefer one line per numbered fix where possible.
-Use format when obvious: Q{{n}}: <corrected sentence or line>
-Otherwise keep the student's layout."""
+FOCUS (CORRECTION style): Prefer one line per numbered response where possible.
+If numbering is visible, preserve it exactly."""
 
 
 def _build_ocr_prompt_paragraph(page_num: int, total_pages: int, language: str) -> str:
     base = _build_ocr_prompt_generic(page_num, total_pages, language)
     return f"""{base}
 
-FOCUS (PARAGRAPH style): Keep question numbers visible, then अर्थ / प्रयोग blocks if present.
-Separate distinct questions with a line containing only: ==="""
+FOCUS (PARAGRAPH style): Keep question numbers/labels visible before each answer block."""
 
 
 def _build_ocr_prompt_word_list(page_num: int, total_pages: int, language: str) -> str:
     base = _build_ocr_prompt_generic(page_num, total_pages, language)
     return f"""{base}
 
-FOCUS (WORD_LIST style): One pair or row per line where possible, e.g.
-<word> — <opposite / gloss / breakdown>
-Keep columns as single lines separated by " | " if needed."""
+FOCUS (WORD_LIST style): Keep one pair/row per line.
+Preserve column order and separators."""
 
 
 def _ocr_prompt_for_page_type(
@@ -260,6 +264,13 @@ _STRUCTURE_ROOT_SCHEMA = types.Schema(
 
 _ANSWER_TYPES = frozenset({"correction", "paragraph", "word_list"})
 
+_OCR_PAGE_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={"text": types.Schema(type=types.Type.STRING)},
+    required=["text"],
+    property_ordering=["text"],
+)
+
 
 # --- JSON / text helpers ---------------------------------------------------------------
 
@@ -284,6 +295,19 @@ def _repair_json(text: str) -> str:
     if open_sq > 0:
         t += "]" * open_sq
     return t
+
+
+def _parse_ocr_page_text(raw: str, page_num: int) -> str:
+    for candidate in (_strip_json_fence(raw), _repair_json(raw)):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("text") is not None:
+            text = str(parsed.get("text", "")).strip()
+            if text:
+                return text
+    raise ValueError(f"Could not parse OCR text JSON for page {page_num}.")
 
 
 def _clamp_pct(value: Any) -> float:
@@ -315,6 +339,29 @@ def _normalize_answer_type(raw: Any) -> str:
     return "paragraph"
 
 
+def _estimate_expected_questions(page_blocks: list[str]) -> int | None:
+    """Heuristic: infer approximate question count from visible numbering labels."""
+    nums: set[int] = set()
+    patterns = (
+        r"\bq(?:uestion)?\s*[:.\-]?\s*(\d{1,3})\b",
+        r"(?:^|\n)\s*\(?(\d{1,3})\)?\s*[.)\-:]\s+",
+        r"(?:प्रश्न|उ\.?\s*प्र\.?)\s*[:.\-]?\s*(\d{1,3})\b",
+    )
+    for block in page_blocks:
+        body = _extract_page_body(block)
+        for pat in patterns:
+            for m in re.finditer(pat, body, flags=re.IGNORECASE):
+                try:
+                    n = int(m.group(1))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= n <= 200:
+                    nums.add(n)
+    if not nums:
+        return None
+    return max(nums)
+
+
 def _normalize_flat_item(
     item: dict[str, Any],
     total_pages: int,
@@ -331,10 +378,12 @@ def _normalize_flat_item(
         qid = 0
     if qid < 1:
         qid = 1
+    ans = str(item.get("student_answer", "")).strip()
     return {
         "question_id": qid,
         "question": str(item.get("question", "")).strip(),
-        "student_answer": str(item.get("student_answer", "")).strip(),
+        "student_answer": ans,
+        "is_attempted": bool(ans),
         "section_name": section_name.strip(),
         "answer_type": _normalize_answer_type(item.get("answer_type")),
         "start_page": start_page,
@@ -381,10 +430,16 @@ def _parse_structure_sections(raw: str, total_pages: int) -> list[dict[str, Any]
             if not isinstance(row, dict):
                 continue
             norm = _normalize_flat_item(row, total_pages, section_name)
-            if norm["student_answer"]:
-                out.append(norm)
+            out.append(norm)
     if not out:
         raise ValueError("No question-answer blocks detected.")
+    out.sort(
+        key=lambda item: (
+            int(item.get("start_page", 1)),
+            float(item.get("start_y_position_percent", 0.0)),
+            int(item.get("question_id", 0)),
+        )
+    )
     for idx, item in enumerate(out, start=1):
         item["question_id"] = idx
     return out
@@ -479,26 +534,35 @@ def _ocr_single_page(
     cfg = types.GenerateContentConfig(
         temperature=0.0,
         max_output_tokens=8192,
+        response_mime_type="application/json",
+        response_schema=_OCR_PAGE_SCHEMA,
     )
-    text = ""
+    page_text = ""
+    last_raw = ""
     for attempt in range(1, 3):
         resp = client.models.generate_content(
             model=MODEL_ID,
             contents=parts,
             config=cfg,
         )
-        text = (getattr(resp, "text", None) or "").strip()
-        if text:
+        last_raw = (getattr(resp, "text", None) or "").strip()
+        if not last_raw:
+            if attempt < 2:
+                time.sleep(0.5)
+            continue
+        try:
+            page_text = _parse_ocr_page_text(last_raw, page_num)
             break
-        if attempt < 2:
-            time.sleep(0.5)
+        except ValueError:
+            if attempt < 2:
+                time.sleep(0.5)
 
-    if not text:
+    if not page_text:
         raise RuntimeError(
-            f"Empty OCR response for page {page_num} after 2 attempts."
+            f"OCR failed for page {page_num} after 2 attempts; raw={last_raw[:200]!r}"
         )
 
-    return f"=== PAGE {page_num} ===\n{text}"
+    return f"=== PAGE {page_num} ===\n{page_text}"
 
 
 def _placeholder_ocr_block(page_num: int, reason: str) -> str:
@@ -507,31 +571,40 @@ def _placeholder_ocr_block(page_num: int, reason: str) -> str:
 
 def _structure_qa(
     client: genai.Client,
-    page_texts: list[str],
+    pages_payload_json: str,
     language: str,
     total_pages: int,
-    page_types_summary: str,
+    *,
+    expected_questions: int | None = None,
 ) -> list[dict[str, Any]]:
-    combined = "\n\n".join(page_texts)
     lang_note = (
-        "Text is Hindi/English mixed; preserve wording in student_answer."
+        "Text is Hindi/English mixed; preserve wording in student_answer when present."
         if (language or "en").strip().lower() == "hi"
-        else "Text may be Hindi/English mixed; preserve wording in student_answer."
+        else "Text may be Hindi/English mixed; preserve wording in student_answer when present."
+    )
+    expected_hint = (
+        f"The exam has approximately {expected_questions} questions. "
+        "You MUST extract all question-answer pairs and not stop early.\n"
+        if expected_questions
+        else ""
     )
     prompt = f"""You are structuring a handwritten exam answer book from OCR text only.
 
-Pages are marked "=== PAGE N ===" for physical page numbers 1..{total_pages}.
-Some pages may contain "[OMITTED: ...]" — those are intentional duplicate skips; do not invent answers for them.
-
-Per-page layout hints (from a prior vision classifier — use as weak priors only):
-{page_types_summary}
+Input is JSON with this shape:
+{{"pages":[{{"page":1,"text":"..."}}, ...]}}
+where page numbers are physical page numbers 1..{total_pages}.
 
 TASK:
-1. Group questions into sections (e.g. वाक्य शुद्धि, वाक्य प्रयोग, विलोम, उपसर्ग/प्रत्यय) using section_name in Hindi or short English when needed.
-2. For each student question: question text/label, full student_answer from OCR (do not shorten), answer_type: correction | paragraph | word_list,
+1. Read pages in order and match each question with its corresponding answer in sequence (question1-answer1, question2-answer2, ...).
+2. Group questions into sections (e.g. वाक्य शुद्धि, वाक्य प्रयोग, विलोम, उपसर्ग/प्रत्यय) using section_name in Hindi or short English when needed.
+3. For each student question: question text/label, full student_answer from OCR (do not shorten), answer_type: correction | paragraph | word_list,
    and layout fields: start_page, start_y_position_percent, end_page, end_y_position_percent, marking_page, marking_x_position_percent, marking_y_position_percent (0–100, page numbers 1..{total_pages}).
 
+4. Include questions that appear in the OCR but have no written answer below them (blank page, placeholder like "Ans:-" only with nothing after, etc.): still emit one row with student_answer exactly "" matching that question stem; do NOT omit unattempted items.
+
 {lang_note}
+{expected_hint}
+CRITICAL: Extract every question from the OCR in order through the last page, including unanswered ones. If you omit visible question stems without answers, output is incomplete.
 
 CRITICAL JSON:
 - Valid JSON only. Use \\n inside strings, never raw newlines inside JSON strings.
@@ -541,11 +614,11 @@ CRITICAL JSON:
 
     parts = [
         types.Part.from_text(text=prompt),
-        types.Part.from_text(text=combined),
+        types.Part.from_text(text=pages_payload_json),
     ]
     cfg = types.GenerateContentConfig(
         temperature=0.1,
-        max_output_tokens=16384,
+        max_output_tokens=65536,
         response_mime_type="application/json",
         response_schema=_STRUCTURE_ROOT_SCHEMA,
     )
@@ -569,6 +642,61 @@ CRITICAL JSON:
     raise ValueError(f"Structure pass failed after 2 attempts: {last_err}") from last_err
 
 
+def _structure_qa_with_fallback(
+    client: genai.Client,
+    pages_payload: dict[str, Any],
+    language: str,
+    total_pages: int,
+    *,
+    expected_questions: int | None = None,
+) -> list[dict[str, Any]]:
+    pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
+    rows = _structure_qa(
+        client,
+        pages_payload_json,
+        language,
+        total_pages,
+        expected_questions=expected_questions,
+    )
+    if expected_questions and len(rows) < max(1, int(expected_questions * 0.8)):
+        pages = pages_payload.get("pages", [])
+        if not isinstance(pages, list) or len(pages) < 2:
+            return rows
+        log.warning(
+            "structure_qa undercount got=%s expected~%s; retry split",
+            len(rows),
+            expected_questions,
+        )
+        mid = len(pages) // 2
+        first = {"pages": pages[:mid]}
+        second = {"pages": pages[mid:]}
+        rows1 = _structure_qa(
+            client,
+            json.dumps(first, ensure_ascii=False),
+            language,
+            total_pages,
+            expected_questions=None,
+        )
+        rows2 = _structure_qa(
+            client,
+            json.dumps(second, ensure_ascii=False),
+            language,
+            total_pages,
+            expected_questions=None,
+        )
+        rows = rows1 + rows2
+        rows.sort(
+            key=lambda item: (
+                int(item.get("start_page", 1)),
+                float(item.get("start_y_position_percent", 0.0)),
+                int(item.get("question_id", 0)),
+            )
+        )
+        for idx, item in enumerate(rows, start=1):
+            item["question_id"] = idx
+    return rows
+
+
 # --- Public API ------------------------------------------------------------------------
 
 
@@ -579,7 +707,7 @@ def smart_ocr_extract_student_answers(
     *,
     request_id: str,
 ) -> dict[str, Any]:
-    """Classify pages → type-aware OCR (parallel) → dedupe → structure into items.
+    """OCR each page (parallel) then structure into items.
 
     Response shape unchanged for HTTP layer: ``{{"items": [...], "page_count": N}}``.
     Each item includes legacy position fields plus ``section_name`` and ``answer_type``.
@@ -593,59 +721,25 @@ def smart_ocr_extract_student_answers(
             f"PDF has {total_pages} page(s); maximum allowed is {max_pages} (COPY_OCR_MAX_PAGES)."
         )
 
-    dpi = copy_ocr_raster_dpi()
+    # Smart OCR needs better handwritten fidelity on long copies; enforce a higher floor.
+    dpi = max(220, copy_ocr_raster_dpi())
     png_pages = rasterize_pdf_to_png_pages(pdf_path, dpi=dpi, request_id=request_id)
     max_workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
 
-    # --- Stage 1: classify each page (parallel) ---
-    classifications: list[str] = ["UNKNOWN"] * total_pages
-
-    def _classify_task(
-        args: tuple[int, bytes, str, str, int, str],
-    ) -> tuple[int, str]:
-        idx, png, key, lang, tp, rid = args
-        pt = _classify_page(key, png, idx + 1, tp, lang)
-        log.info(
-            "smart_ocr[%s] stage1 classify page=%s/%s -> %s",
-            rid,
-            idx + 1,
-            tp,
-            pt,
-        )
-        return idx, pt
-
-    classify_args = [
-        (i, png_pages[i], api_key, language, total_pages, request_id)
-        for i in range(total_pages)
-    ]
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futs = {pool.submit(_classify_task, a): a[0] for a in classify_args}
-        for fut in as_completed(futs):
-            idx, pt = fut.result()
-            classifications[idx] = pt
-
-    # --- Stage 2: type-aware OCR (skip body OCR for DUPLICATE after page 1) ---
+    # --- Stage 1: OCR each page (parallel) ---
     page_blocks: list[str] = [""] * total_pages
 
     def _ocr_task(
-        args: tuple[int, bytes, str, str, int, str, str],
+        args: tuple[int, bytes, str, str, int, str],
     ) -> tuple[int, str]:
-        idx, png, key, lang, tp, rid, page_type = args
+        idx, png, key, lang, tp, rid = args
         pno = idx + 1
-        if page_type == "DUPLICATE" and idx > 0:
-            block = _placeholder_ocr_block(
-                pno,
-                "OMITTED: DUPLICATE class — OCR skipped; compare/dedup uses earlier pages.",
-            )
-            log.info("smart_ocr[%s] stage2 skip OCR page=%s (DUPLICATE)", rid, pno)
-            return idx, block
-        block = _ocr_single_page(key, png, pno, tp, lang, page_type)
+        block = _ocr_single_page(key, png, pno, tp, lang, "UNKNOWN")
         log.info(
-            "smart_ocr[%s] stage2 ocr page=%s/%s type=%s chars=%s",
+            "smart_ocr[%s] stage1 ocr page=%s/%s chars=%s",
             rid,
             pno,
             tp,
-            page_type,
             len(block),
         )
         return idx, block
@@ -658,7 +752,6 @@ def smart_ocr_extract_student_answers(
             language,
             total_pages,
             request_id,
-            classifications[i],
         )
         for i in range(total_pages)
     ]
@@ -668,32 +761,51 @@ def smart_ocr_extract_student_answers(
             idx, block = fut.result()
             page_blocks[idx] = block
 
-    # --- Stage 3: dedupe near-identical bodies (after DUPLICATE placeholders) ---
+    # Deduplicate near-identical neighboring pages to reduce structure token load.
     page_blocks = _deduplicate_page_texts(
-        page_blocks, classifications, request_id
+        page_blocks,
+        ["UNKNOWN"] * total_pages,
+        request_id,
     )
 
     log.info(
-        "smart_ocr[%s] after stage2+dedup total_chars=%s",
+        "smart_ocr[%s] after stage1 ocr total_chars=%s",
         request_id,
         sum(len(b) for b in page_blocks),
     )
 
-    # --- Stage 4: structure (text only) ---
-    page_types_summary = "\n".join(
-        f"PAGE {i + 1}: {classifications[i]}" for i in range(total_pages)
+    # --- Stage 2: build per-page OCR JSON payload for structure pass ---
+    pages_payload = {"pages": []}
+    for i, block in enumerate(page_blocks):
+        pages_payload["pages"].append(
+            {
+                "page": i + 1,
+                "text": _extract_page_body(block),
+            }
+        )
+    pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
+    payload_tokens_est = len(pages_payload_json) // 4
+    expected_questions = _estimate_expected_questions(page_blocks)
+    log.info(
+        "smart_ocr[%s] structure input_tokens_est=%s output_cap=%s expected_questions=%s",
+        request_id,
+        payload_tokens_est,
+        65536,
+        expected_questions,
     )
+
+    # --- Stage 3: structure from OCR JSON payload ---
     structure_client = genai.Client(api_key=api_key)
-    rows = _structure_qa(
+    rows = _structure_qa_with_fallback(
         structure_client,
-        page_blocks,
+        pages_payload,
         language,
         total_pages,
-        page_types_summary,
+        expected_questions=expected_questions,
     )
 
     log.info(
-        "smart_ocr[%s] stage4 structure complete questions=%s",
+        "smart_ocr[%s] stage3 structure complete questions=%s",
         request_id,
         len(rows),
     )

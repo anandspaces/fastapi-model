@@ -83,7 +83,11 @@ JWT_EXPIRES_MINUTES = int(os.getenv("JWT_EXPIRES_MINUTES", "60"))
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     init_db()
     yield
 
@@ -1050,18 +1054,33 @@ async def post_analyse_smart_ocr(
             except OSError:
                 log.warning("analyse/smart-ocr temp unlink failed path=%s", tmp)
 
+    page_count = result.get("page_count")
     items = result.get("items", [])
+    if not isinstance(page_count, int) or page_count < 1:
+        log.error(
+            "analyse/smart-ocr invalid result request_id=%s page_count=%r",
+            rid,
+            page_count,
+        )
+        return JSONResponse(_err("AI service error: invalid OCR page count."), status_code=500)
+    if not isinstance(items, list):
+        log.error(
+            "analyse/smart-ocr invalid result request_id=%s items_type=%s",
+            rid,
+            type(items).__name__,
+        )
+        return JSONResponse(_err("AI service error: invalid OCR items."), status_code=500)
     log.info(
         "analyse/smart-ocr ok request_id=%s page_count=%s item_count=%s",
         rid,
-        result.get("page_count"),
-        len(items) if isinstance(items, list) else 0,
+        page_count,
+        len(items),
     )
     return JSONResponse(
         _ok(
             "Smart OCR complete.",
-            pageCount=result["page_count"],
-            items=result["items"],
+            pageCount=page_count,
+            items=items,
         )
     )
 
