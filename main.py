@@ -33,6 +33,7 @@ from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
+    merge_evaluations_into_items,
 )
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
@@ -1000,7 +1001,8 @@ async def post_analyse_smart_ocr(
     """Extracts question-wise answers and marking coordinates from a PDF.
 
     If modelId is provided, also runs Stage 3 grading against the stored answer
-    model and returns an `evaluations` array alongside `items`.
+    model and merges marks, status, feedback, and annotations into each object
+    in ``items`` (same ``question_id``).
     """
     user, auth_err = _require_auth_user(request)
     if auth_err:
@@ -1102,7 +1104,6 @@ async def post_analyse_smart_ocr(
     )
 
     # --- Stage 3: grading (only when modelId provided) ---
-    evaluations: list | None = None
     if answer_model:
         try:
             questions = answer_model.get("questions") or []
@@ -1110,7 +1111,7 @@ async def post_analyse_smart_ocr(
             teacher_instructions = format_answer_model_as_teacher_instructions(
                 questions, title
             )
-            evaluations = await asyncio.to_thread(
+            ev_list = await asyncio.to_thread(
                 evaluate_student_answers_against_model,
                 api_key,
                 title,
@@ -1118,11 +1119,12 @@ async def post_analyse_smart_ocr(
                 items,
                 request_id=rid,
             )
+            items = merge_evaluations_into_items(items, ev_list)
             log.info(
-                "analyse/smart-ocr eval ok request_id=%s model_id=%s evaluations=%s",
+                "analyse/smart-ocr eval ok request_id=%s model_id=%s merged_items=%s",
                 rid,
                 mid,
-                len(evaluations),
+                len(items),
             )
         except Exception as e:
             log.exception(
@@ -1135,7 +1137,6 @@ async def post_analyse_smart_ocr(
                     pageCount=page_count,
                     items=items,
                     modelId=mid,
-                    evaluations=None,
                     gradingError=str(e),
                 )
             )
@@ -1144,8 +1145,6 @@ async def post_analyse_smart_ocr(
     extra: dict = {}
     if mid:
         extra["modelId"] = mid
-    if evaluations is not None:
-        extra["evaluations"] = evaluations
 
     return JSONResponse(
         _ok(

@@ -205,6 +205,75 @@ def _regex_extract_evaluations(text: str) -> list[dict[str, Any]]:
     return results
 
 
+# Keys produced by Stage 3 grading (merged into each OCR item; avoid duplicating
+# question text / coordinates already present from Stage 2).
+_GRADING_KEYS = (
+    "max_marks",
+    "marks_awarded",
+    "status",
+    "student_answer_summary",
+    "feedback",
+    "annotations",
+)
+
+
+def _norm_question_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_evaluations_into_items(
+    items: list[dict[str, Any]],
+    evaluations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach Stage 3 grading fields to each OCR item by ``question_id``.
+
+    Teacher-only questions (present in ``evaluations`` but not in ``items``) are
+    appended so every graded row appears once.
+    """
+    by_qid: dict[int, dict[str, Any]] = {}
+    for ev in evaluations:
+        qid = _norm_question_id(ev.get("question_id"))
+        if qid is not None:
+            by_qid[qid] = ev
+
+    merged: list[dict[str, Any]] = []
+    used_qids: set[int] = set()
+
+    for item in items:
+        out = dict(item)
+        qid = _norm_question_id(item.get("question_id"))
+        ev = by_qid.get(qid) if qid is not None else None
+        if ev is not None and qid is not None:
+            used_qids.add(qid)
+            for k in _GRADING_KEYS:
+                if k in ev:
+                    out[k] = ev[k]
+        merged.append(out)
+
+    for qid, ev in by_qid.items():
+        if qid in used_qids:
+            continue
+        row = dict(ev)
+        if "student_answer" not in row:
+            row["student_answer"] = ""
+        if "is_attempted" not in row:
+            st = str(row.get("status") or "").lower()
+            row["is_attempted"] = st not in ("", "unattempted")
+        merged.append(row)
+
+    merged.sort(
+        key=lambda r: (
+            _norm_question_id(r.get("question_id")) or 10**9,
+        )
+    )
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
