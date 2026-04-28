@@ -30,6 +30,10 @@ from src.gemini_copy_ocr import (
     ocr_essay_copy_pdf_rasterized,
 )
 from src.gemini_smart_ocr import smart_ocr_extract_student_answers
+from src.gemini_evaluate_student_answers import (
+    evaluate_student_answers_against_model,
+    format_answer_model_as_teacher_instructions,
+)
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
@@ -991,16 +995,23 @@ async def post_analyse_smart_ocr(
     request: Request,
     file: UploadFile = File(...),
     language: str = Form("en"),
+    model_id: str = Form("", alias="modelId"),
 ) -> JSONResponse:
-    """Extracts question-wise answers and marking coordinates from a PDF."""
+    """Extracts question-wise answers and marking coordinates from a PDF.
+
+    If modelId is provided, also runs Stage 3 grading against the stored answer
+    model and returns an `evaluations` array alongside `items`.
+    """
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
+
     lang = language.strip().lower()
     if not _valid_lang(lang):
         return JSONResponse(_err("language must be en or hi"))
     if not _is_pdf(file.filename, file.content_type):
         return JSONResponse(_err("file must be a PDF."))
+
     raw = await file.read()
     if not raw:
         return JSONResponse(_err("file is empty."))
@@ -1016,18 +1027,30 @@ async def post_analyse_smart_ocr(
         return JSONResponse(_err("file does not look like a valid PDF."))
 
     rid = str(uuid.uuid4())
+    mid = model_id.strip()
+
     log.info(
-        "analyse/smart-ocr start request_id=%s user_id=%s filename=%r bytes=%s",
+        "analyse/smart-ocr start request_id=%s user_id=%s filename=%r bytes=%s model_id=%r",
         rid,
         user.get("id"),
         file.filename,
         len(raw),
+        mid or "(none)",
     )
+
+    # --- Validate model early (before burning OCR tokens) ---
+    answer_model: dict | None = None
+    if mid:
+        answer_model = get_answer_model(mid, user["id"])
+        if not answer_model:
+            return JSONResponse(_err("Model not found."))
+
     try:
         api_key = load_api_key()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
 
+    # --- Stage 1+2: OCR + structure ---
     tmp: Path | None = None
     try:
         fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
@@ -1070,17 +1093,66 @@ async def post_analyse_smart_ocr(
             type(items).__name__,
         )
         return JSONResponse(_err("AI service error: invalid OCR items."), status_code=500)
+
     log.info(
-        "analyse/smart-ocr ok request_id=%s page_count=%s item_count=%s",
+        "analyse/smart-ocr ocr+structure ok request_id=%s page_count=%s item_count=%s",
         rid,
         page_count,
         len(items),
     )
+
+    # --- Stage 3: grading (only when modelId provided) ---
+    evaluations: list | None = None
+    if answer_model:
+        try:
+            questions = answer_model.get("questions") or []
+            title = answer_model.get("title") or "General"
+            teacher_instructions = format_answer_model_as_teacher_instructions(
+                questions, title
+            )
+            evaluations = await asyncio.to_thread(
+                evaluate_student_answers_against_model,
+                api_key,
+                title,
+                teacher_instructions,
+                items,
+                request_id=rid,
+            )
+            log.info(
+                "analyse/smart-ocr eval ok request_id=%s model_id=%s evaluations=%s",
+                rid,
+                mid,
+                len(evaluations),
+            )
+        except Exception as e:
+            log.exception(
+                "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid
+            )
+            # Don't fail the whole response — return OCR items with error note
+            return JSONResponse(
+                _ok(
+                    "Smart OCR complete. Grading failed.",
+                    pageCount=page_count,
+                    items=items,
+                    modelId=mid,
+                    evaluations=None,
+                    gradingError=str(e),
+                )
+            )
+
+    # --- Build response ---
+    extra: dict = {}
+    if mid:
+        extra["modelId"] = mid
+    if evaluations is not None:
+        extra["evaluations"] = evaluations
+
     return JSONResponse(
         _ok(
             "Smart OCR complete.",
             pageCount=page_count,
             items=items,
+            **extra,
         )
     )
 
