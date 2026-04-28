@@ -264,6 +264,45 @@ _STRUCTURE_ROOT_SCHEMA = types.Schema(
 
 _ANSWER_TYPES = frozenset({"correction", "paragraph", "word_list"})
 
+_QUESTION_NUM_RE = re.compile(
+    r"""
+    (?:
+        \b(?:que(?:stion)?|q)\s*[:\.\-]?\s*(\d{1,3})\b       # Que:7 / Q.3 / Question 10
+      | \bप्रश्न\s*[:\.\-]?\s*(\d{1,3})\b                     # प्रश्न 5
+      | ^\s*\((\d{1,3})\)\s*[:\.\-]                          # (3):
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE | re.MULTILINE,
+)
+
+
+def _extract_question_number(question_text: str) -> int | None:
+    """Parse the original question number from its leading label text."""
+    m = _QUESTION_NUM_RE.search(question_text or "")
+    if not m:
+        return None
+    for g in m.groups():
+        if g is not None:
+            try:
+                n = int(g, 10)
+                return n if 1 <= n <= 500 else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _structure_item_sort_key(item: dict[str, Any]) -> tuple[int | float, ...]:
+    sp = int(item.get("start_page", 1))
+    sy = float(item.get("start_y_position_percent", 0.0))
+    qi = item.get("question_id")
+    if qi is None:
+        return (sp, sy, 999999)
+    try:
+        return (sp, sy, int(qi))
+    except (TypeError, ValueError):
+        return (sp, sy, 999998)
+
+
 _OCR_PAGE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={"text": types.Schema(type=types.Type.STRING)},
@@ -372,16 +411,24 @@ def _normalize_flat_item(
     if end_page < start_page:
         end_page = start_page
     marking_page = _page_num(item.get("marking_page"), total_pages, start_page)
+
+    question_text = str(item.get("question", "")).strip()
+    label_num = _extract_question_number(question_text)
     try:
-        qid = int(item.get("question_id", 0))
+        model_qid = int(item.get("question_id", 0))
     except (TypeError, ValueError):
-        qid = 0
-    if qid < 1:
-        qid = 1
+        model_qid = 0
+    if label_num is not None:
+        qid: int | None = label_num
+    elif model_qid >= 1:
+        qid = model_qid
+    else:
+        qid = None
+
     ans = str(item.get("student_answer", "")).strip()
     return {
         "question_id": qid,
-        "question": str(item.get("question", "")).strip(),
+        "question": question_text,
         "student_answer": ans,
         "is_attempted": bool(ans),
         "section_name": section_name.strip(),
@@ -433,15 +480,22 @@ def _parse_structure_sections(raw: str, total_pages: int) -> list[dict[str, Any]
             out.append(norm)
     if not out:
         raise ValueError("No question-answer blocks detected.")
-    out.sort(
-        key=lambda item: (
-            int(item.get("start_page", 1)),
-            float(item.get("start_y_position_percent", 0.0)),
-            int(item.get("question_id", 0)),
-        )
-    )
-    for idx, item in enumerate(out, start=1):
-        item["question_id"] = idx
+    out.sort(key=_structure_item_sort_key)
+
+    used_ids: set[int] = {
+        i
+        for i in (item.get("question_id") for item in out)
+        if isinstance(i, int)
+    }
+    fallback_counter = 1
+    for item in out:
+        if item.get("question_id") is not None:
+            continue
+        while fallback_counter in used_ids:
+            fallback_counter += 1
+        item["question_id"] = fallback_counter
+        used_ids.add(fallback_counter)
+        fallback_counter += 1
     return out
 
 
@@ -616,7 +670,11 @@ TASK:
 3. Group questions into sections using section_name in Hindi or short English.
 
 4. For each question emit:
-   - question_id: sequential integer (1, 2, 3 ...)
+   - question_id: the integer taken from that question stem's label in the OCR.
+     Examples: Que:7 → 7, Q.3 → 3, प्रश्न 5 → 5.
+     Do NOT substitute sequential 1,2,3 … when the paper shows Que:10, Que:11, etc. Use the printed numbering.
+     If no number is visible in the stem, guess from context; the server may assign a gap id when still unknown.
+     NEVER invent a row for a booklet question that never appears in the OCR (if Q7 is absent everywhere, omit question_id 7 entirely).
    - question: full question text including any sub-part labels
    - student_answer: complete answer text, joining sub-part answers with \\n\\n
    - answer_type: correction | paragraph | word_list
@@ -726,15 +784,15 @@ def _structure_qa_with_fallback(
             expected_questions=None,
         )
         rows = rows1 + rows2
-        rows.sort(
-            key=lambda item: (
-                int(item.get("start_page", 1)),
-                float(item.get("start_y_position_percent", 0.0)),
-                int(item.get("question_id", 0)),
-            )
-        )
-        for idx, item in enumerate(rows, start=1):
-            item["question_id"] = idx
+        rows.sort(key=_structure_item_sort_key)
+        seen_ids: set[Any] = set()
+        deduped: list[dict[str, Any]] = []
+        for item in rows:
+            qid = item.get("question_id")
+            if qid not in seen_ids:
+                deduped.append(item)
+                seen_ids.add(qid)
+        rows = deduped
     return rows
 
 
