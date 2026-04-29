@@ -5,13 +5,12 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-
-log = logging.getLogger(__name__)
 
 from google import genai
 from google.genai import types
@@ -24,6 +23,16 @@ from src.gemini_copy_ocr import (
     rasterize_pdf_to_png_pages,
 )
 from src.gemini_extract import MODEL_ID
+
+log = logging.getLogger(__name__)
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = (os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
 
 # --- Stage 1: page classification (tiny JSON per page) ---------------------------------
 
@@ -619,10 +628,6 @@ def _ocr_single_page(
     return f"=== PAGE {page_num} ===\n{page_text}"
 
 
-def _placeholder_ocr_block(page_num: int, reason: str) -> str:
-    return f"=== PAGE {page_num} ===\n[{reason}]\n"
-
-
 def _structure_qa(
     client: genai.Client,
     pages_payload_json: str,
@@ -647,6 +652,18 @@ def _structure_qa(
 Input is JSON with this shape:
 {{"pages":[{{"page":1,"text":"..."}}, ...]}}
 where page numbers are physical page numbers 1..{total_pages}.
+
+PHASE 2 ONLY (this structure pass) — SEGREGATE INTRO / COVER / ADMIN SHEETS:
+The prior OCR pass transcribed every page verbatim. Here you must IGNORE front-matter
+when building graded answer rows:
+- Typical non-answer pages: candidate particulars, roll/barcode, serial seals, instructions
+  ("read carefully", "do not write in margin"), timing, rough-work-only areas, blank
+  continuation headers, invigilator notes, etc.
+- Do NOT emit any question row whose text is only that boilerplate — it is not an exam answer.
+- Answers almost always start where real question labels appear (Q1, Que:1, प्रश्न 1,
+  Section A/B, Paper codes) together with the student's handwritten response.
+- If OCR mixes boilerplate and real answers on one page, attach coordinates and text to
+  the actual question/answer blocks only; do not invent phantom Q… rows from cover text.
 
 TASK:
 1. Read pages in order and identify TOP-LEVEL questions only.
@@ -682,8 +699,11 @@ TASK:
    - end_page, end_y_position_percent: where the answer ends
    - marking_page, marking_x_position_percent, marking_y_position_percent (0–100, page numbers 1..{total_pages})
 
-5. Include questions with no answer written (blank page, "Ans:-" with nothing after):
-   emit one row with student_answer exactly "" — do NOT omit unanswered items.
+5. BLANK / UNATTEMPTED ANSWERS — CRITICAL:
+   - If there is no handwritten answer (blank area, only the question printed, "Ans:-" with nothing after):
+     set student_answer to exactly "" (empty string). Do NOT invent or paraphrase filler text.
+     Do NOT put teacher feedback, scores, or commentary inside student_answer — that field is OCR content only.
+   - Still emit one row per such question so numbering stays aligned — do NOT omit unanswered questions.
 
 {lang_note}
 {expected_hint}
@@ -806,7 +826,9 @@ def smart_ocr_extract_student_answers(
     *,
     request_id: str,
 ) -> dict[str, Any]:
-    """OCR each page (parallel) then structure into items.
+    """Classify pages → type-aware OCR → dedupe → structure into items.
+
+    Cover / intro segregation is done in the structure (phase 2) Gemini pass — not here.
 
     Response shape unchanged for HTTP layer: ``{{"items": [...], "page_count": N}}``.
     Each item includes legacy position fields plus ``section_name`` and ``answer_type``.
@@ -820,55 +842,77 @@ def smart_ocr_extract_student_answers(
             f"PDF has {total_pages} page(s); maximum allowed is {max_pages} (COPY_OCR_MAX_PAGES)."
         )
 
+    run_classify = _env_bool("SMART_OCR_CLASSIFY", True)
+
     # Smart OCR needs better handwritten fidelity on long copies; enforce a higher floor.
     dpi = max(220, copy_ocr_raster_dpi())
     png_pages = rasterize_pdf_to_png_pages(pdf_path, dpi=dpi, request_id=request_id)
     max_workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
 
-    # --- Stage 1: OCR each page (parallel) ---
+    classifications: list[str] = ["UNKNOWN"] * total_pages
+
+    def _classify_job(idx: int) -> tuple[int, str]:
+        pno = idx + 1
+        if not run_classify:
+            return idx, "UNKNOWN"
+        try:
+            label = _classify_page(
+                api_key, png_pages[idx], pno, total_pages, language
+            )
+            log.info(
+                "smart_ocr[%s] classify page=%s/%s -> %s",
+                request_id,
+                pno,
+                total_pages,
+                label,
+            )
+            return idx, label
+        except Exception as e:
+            log.warning(
+                "smart_ocr[%s] classify failed page=%s: %s",
+                request_id,
+                pno,
+                e,
+            )
+            return idx, "UNKNOWN"
+
+    # --- Stage 1a: classify each page (parallel) ---
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        cls_futures = [pool.submit(_classify_job, i) for i in range(total_pages)]
+        for fut in as_completed(cls_futures):
+            idx, lbl = fut.result()
+            classifications[idx] = lbl
+
+    # --- Stage 1b: type-aware OCR each page (parallel) ---
     page_blocks: list[str] = [""] * total_pages
 
-    def _ocr_task(
-        args: tuple[int, bytes, str, str, int, str],
-    ) -> tuple[int, str]:
-        idx, png, key, lang, tp, rid = args
+    def _ocr_job(idx: int) -> tuple[int, str]:
         pno = idx + 1
-        block = _ocr_single_page(key, png, pno, tp, lang, "UNKNOWN")
+        pt = classifications[idx]
+        block = _ocr_single_page(
+            api_key, png_pages[idx], pno, total_pages, language, pt
+        )
         log.info(
-            "smart_ocr[%s] stage1 ocr page=%s/%s chars=%s",
-            rid,
+            "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
+            request_id,
             pno,
-            tp,
+            total_pages,
+            pt,
             len(block),
         )
         return idx, block
 
-    ocr_args = [
-        (
-            i,
-            png_pages[i],
-            api_key,
-            language,
-            total_pages,
-            request_id,
-        )
-        for i in range(total_pages)
-    ]
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futs = {pool.submit(_ocr_task, a): a[0] for a in ocr_args}
-        for fut in as_completed(futs):
+        ocr_futures = [pool.submit(_ocr_job, i) for i in range(total_pages)]
+        for fut in as_completed(ocr_futures):
             idx, block = fut.result()
             page_blocks[idx] = block
 
-    # Deduplicate near-identical neighboring pages to reduce structure token load.
-    page_blocks = _deduplicate_page_texts(
-        page_blocks,
-        ["UNKNOWN"] * total_pages,
-        request_id,
-    )
+    # Deduplicate near-identical neighboring pages (uses DUPLICATE vs similarity rules).
+    page_blocks = _deduplicate_page_texts(page_blocks, classifications, request_id)
 
     log.info(
-        "smart_ocr[%s] after stage1 ocr total_chars=%s",
+        "smart_ocr[%s] after ocr+dedup total_chars=%s",
         request_id,
         sum(len(b) for b in page_blocks),
     )

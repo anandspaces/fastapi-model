@@ -34,6 +34,7 @@ from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
     merge_evaluations_into_items,
+    student_items_for_grading,
 )
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
@@ -714,6 +715,34 @@ def _valid_lang(code: str) -> bool:
     return code.strip().lower() in ("en", "hi")
 
 
+def _smart_ocr_skipped_pages(page_count: int, items: list) -> list[int]:
+    """1-based page numbers with no structured answer content (intro/cover/orphan sheets).
+
+    Uses items produced by the structure pass: any row with a non-empty ``section_name``
+    contributes its ``start_page``..``end_page`` span. Rows without ``section_name``
+    (e.g. evaluator-only placeholders for unattempted questions) are ignored so bogus
+    default coordinates do not hide a skipped intro page."""
+    covered: set[int] = set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        sec = raw.get("section_name")
+        if sec is None or (isinstance(sec, str) and not sec.strip()):
+            continue
+        try:
+            sp = int(raw.get("start_page", 1))
+            ep = int(raw.get("end_page", sp))
+        except (TypeError, ValueError):
+            continue
+        if ep < sp:
+            ep = sp
+        sp = max(1, min(sp, page_count))
+        ep = max(1, min(ep, page_count))
+        for p in range(sp, ep + 1):
+            covered.add(p)
+    return [p for p in range(1, page_count + 1) if p not in covered]
+
+
 @app.post("/model/answer-expand")
 async def post_model_answer_expand(
     request: Request, payload: ExpandModelAnswerRequest
@@ -1007,7 +1036,11 @@ async def post_analyse_smart_ocr(
 
     If modelId is provided, also runs Stage 3 grading against the stored answer
     model and merges marks, status, feedback, and annotations into each object
-    in ``items`` (same ``question_id``).
+    in ``items`` (same ``question_id``). Intro/cover pages are segregated in the
+    structure (phase 2) pass, not via extra API parameters.
+
+    Response includes ``skippedPages``: 1-based page indexes not covered by any
+    structured question row (typically intro/cover sheets).
     """
     user, auth_err = _require_auth_user(request)
     if auth_err:
@@ -1116,12 +1149,13 @@ async def post_analyse_smart_ocr(
             teacher_instructions = format_answer_model_as_teacher_instructions(
                 questions, title
             )
+            items_to_grade = student_items_for_grading(items)
             ev_list = await asyncio.to_thread(
                 evaluate_student_answers_against_model,
                 api_key,
                 title,
                 teacher_instructions,
-                items,
+                items_to_grade,
                 request_id=rid,
             )
             items = merge_evaluations_into_items(items, ev_list)
@@ -1143,6 +1177,7 @@ async def post_analyse_smart_ocr(
                     items=items,
                     modelId=mid,
                     gradingError=str(e),
+                    skippedPages=_smart_ocr_skipped_pages(page_count, items),
                 )
             )
 
@@ -1150,12 +1185,14 @@ async def post_analyse_smart_ocr(
     extra: dict = {}
     if mid:
         extra["modelId"] = mid
+    skipped_pages = _smart_ocr_skipped_pages(page_count, items)
 
     return JSONResponse(
         _ok(
             "Smart OCR complete.",
             pageCount=page_count,
             items=items,
+            skippedPages=skipped_pages,
             **extra,
         )
     )

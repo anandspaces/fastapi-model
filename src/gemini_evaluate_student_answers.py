@@ -66,6 +66,7 @@ def _build_evaluation_prompt(
 You are given:
 1. TEACHER INSTRUCTIONS / MODEL KEY — the correct questions, answers, marks, or marking rules provided by the teacher.
 2. A STUDENT's OCR-extracted answers (student_answer) from their handwritten copy.
+   Rows with completely blank answers may be omitted from this JSON entirely — you must still emit "unattempted" with 0 marks for those questions in TEACHER INSTRUCTIONS using default position fields only (no speculative feedback inventing handwriting that was not OCR'd).
 
 Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answers. Find each question's matching student answer and award marks. Match the student's answer to the specific model key question by content or question number, even if the student answered them out of order (e.g. if the student answered Q5 first, match it to Q5 in the model key). If a question is present in the TEACHER INSTRUCTIONS but missing from the student's answers, it MUST be included in the output with a status of "unattempted" and 0 marks.
 
@@ -224,6 +225,20 @@ def _norm_question_id(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def item_is_attempted_for_grading(item: dict[str, Any]) -> bool:
+    """True if OCR has substantive answer text worth sending to Gemini for grading."""
+    if item.get("is_attempted") is False:
+        return False
+    return bool(str(item.get("student_answer", "") or "").strip())
+
+
+def student_items_for_grading(
+    student_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Subset passed to Gemini. Blank / unattempted rows are graded as unattempted without LLM fabricating feedback."""
+    return [it for it in student_items if item_is_attempted_for_grading(it)]
 
 
 def merge_evaluations_into_items(
