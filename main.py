@@ -492,6 +492,7 @@ async def post_answer_booklet(
             id=id,
             questions=questions,
             booklet_type=bt_raw,
+            intro_page=2,
         )
     )
 

@@ -200,6 +200,7 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
         "questions": questions,
         "created_at": row["created_at"],
         "booklet_type": str(booklet_type),
+        "intro_page": 2,
     }
 
 
