@@ -486,13 +486,16 @@ async def post_answer_booklet(
         dest.unlink(missing_ok=True)
         return JSONResponse(_err(str(e)))
 
+    row = get_answer_model(id, user["id"])
+    intro_page = int((row or {}).get("intro_page") or 2)
+
     return JSONResponse(
         _ok(
             "Answer booklet uploaded successfully",
             id=id,
             questions=questions,
             booklet_type=bt_raw,
-            intro_page=2,
+            intro_page=intro_page,
         )
     )
 
@@ -637,8 +640,8 @@ async def put_questions_bulk_page_marks(
         mk,
         len(tuples),
     )
-    ok, reason, updated_ids, not_found_ids = bulk_patch_answer_model_question_page_marks(
-        mk, user["id"], tuples
+    ok, reason, updated_ids, not_found_ids, intro_page = bulk_patch_answer_model_question_page_marks(
+        mk, user["id"], tuples, payload.intro_page
     )
     if not ok:
         log.warning(
@@ -664,6 +667,7 @@ async def put_questions_bulk_page_marks(
             notFoundQuestionIds=not_found_ids,
             updatedCount=len(updated_ids),
             notFoundCount=len(not_found_ids),
+            intro_page=intro_page,
         )
     )
 

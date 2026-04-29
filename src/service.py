@@ -192,6 +192,7 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
     questions = json.loads(row["questions_json"])
     rdict = dict(row)
     booklet_type = rdict.get("booklet_type") or "standard"
+    intro_page = int(rdict.get("intro_page") or 2)
     return {
         "id": row["id"],
         "title": row["title"],
@@ -200,7 +201,7 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
         "questions": questions,
         "created_at": row["created_at"],
         "booklet_type": str(booklet_type),
-        "intro_page": 2,
+        "intro_page": intro_page,
     }
 
 
@@ -285,7 +286,7 @@ def add_answer_model_question(
     """
     with get_conn() as db:
         row = db.execute(
-            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            "SELECT questions_json, intro_page FROM answer_models WHERE id = ? AND owner_user_id = ?",
             (model_id, owner_user_id),
         ).fetchone()
         if not row:
@@ -396,7 +397,8 @@ def bulk_patch_answer_model_question_page_marks(
     model_id: str,
     owner_user_id: str,
     items: list[tuple[str, int, int]],
-) -> tuple[bool, str | None, list[str], list[str]]:
+    intro_page: int | None = None,
+) -> tuple[bool, str | None, list[str], list[str], int]:
     """Apply pageNum/marks for many question ids. Unknown ids skipped (reported in not_found).
 
     Duplicate question_ids in *items*: last occurrence wins. Returns
@@ -408,18 +410,26 @@ def bulk_patch_answer_model_question_page_marks(
             (model_id, owner_user_id),
         ).fetchone()
         if not row:
-            return False, "Model not found", [], []
+            return False, "Model not found", [], [], 2
 
         if not items:
-            return True, None, [], []
+            current_intro = int((dict(row).get("intro_page") or 2))
+            if intro_page is not None:
+                current_intro = int(intro_page)
+                db.execute(
+                    "UPDATE answer_models SET intro_page = ? WHERE id = ? AND owner_user_id = ?",
+                    (current_intro, model_id, owner_user_id),
+                )
+                db.commit()
+            return True, None, [], [], current_intro
 
         try:
             questions = json.loads(row["questions_json"])
         except Exception:
-            return False, "Invalid questions_json", [], []
+            return False, "Invalid questions_json", [], [], 2
 
         if not isinstance(questions, list):
-            return False, "Invalid questions_json", [], []
+            return False, "Invalid questions_json", [], [], 2
 
         id_to_index: dict[str, int] = {}
         for i, q in enumerate(questions):
@@ -448,12 +458,15 @@ def bulk_patch_answer_model_question_page_marks(
                 updated_order.append(qid)
 
         qjson = json.dumps(questions, ensure_ascii=False)
+        next_intro_page = int((dict(row).get("intro_page") or 2))
+        if intro_page is not None:
+            next_intro_page = int(intro_page)
         db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
-            (qjson, len(questions), model_id, owner_user_id),
+            "UPDATE answer_models SET questions_json = ?, question_count = ?, intro_page = ? WHERE id = ? AND owner_user_id = ?",
+            (qjson, len(questions), next_intro_page, model_id, owner_user_id),
         )
         db.commit()
-    return True, None, updated_order, not_found_order
+    return True, None, updated_order, not_found_order, next_intro_page
 
 
 def reorder_answer_model_questions(

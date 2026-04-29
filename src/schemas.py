@@ -36,6 +36,7 @@ class QuestionPageMarksItem(BaseModel):
 class BulkQuestionPageMarksPayload(BaseModel):
     modelKey: str = Field(min_length=1)
     items: list[QuestionPageMarksItem]
+    intro_page: int | None = Field(default=None, ge=1)
 
 
 class CachedOcrRequest(BaseModel):

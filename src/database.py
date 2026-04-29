@@ -77,4 +77,12 @@ def init_db() -> None:
                 "ALTER TABLE answer_models ADD COLUMN booklet_type TEXT NOT NULL DEFAULT 'standard'"
             )
 
+        answer_cols = {
+            row["name"] for row in db.execute("PRAGMA table_info(answer_models)").fetchall()
+        }
+        if "intro_page" not in answer_cols:
+            db.execute(
+                "ALTER TABLE answer_models ADD COLUMN intro_page INTEGER NOT NULL DEFAULT 2"
+            )
+
         db.commit()
