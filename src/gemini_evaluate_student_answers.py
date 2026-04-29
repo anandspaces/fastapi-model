@@ -66,7 +66,7 @@ def _build_evaluation_prompt(
 You are given:
 1. TEACHER INSTRUCTIONS / MODEL KEY — the correct questions, answers, marks, or marking rules provided by the teacher.
 2. A STUDENT's OCR-extracted answers (student_answer) from their handwritten copy.
-   Rows with completely blank answers may be omitted from this JSON entirely — you must still emit "unattempted" with 0 marks for those questions in TEACHER INSTRUCTIONS using default position fields only (no speculative feedback inventing handwriting that was not OCR'd).
+   Rows with completely blank answers may be omitted from this JSON — you must still emit "unattempted" with 0 marks for every TEACHER question. Do not invent OCR text in ``student_answer_summary``.
 
 Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answers. Find each question's matching student answer and award marks. Match the student's answer to the specific model key question by content or question number, even if the student answered them out of order (e.g. if the student answered Q5 first, match it to Q5 in the model key). If a question is present in the TEACHER INSTRUCTIONS but missing from the student's answers, it MUST be included in the output with a status of "unattempted" and 0 marks.
 
@@ -114,8 +114,11 @@ OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST ou
   }}
 ]
 
-IMPORTANT: Copy ALL page bound and marking position_percent fields from the matching student OCR answer directly into your output. For unattempted questions, provide safe defaults for page fields (e.g. start_page=1, start_y_position_percent=10.0, etc.) so that the app doesn't crash.
-The "annotations" array MUST contain at least 1-3 specific spots FOR EVERY SINGLE PAGE the student's answer spans. Do NOT put all annotations on one page. Distribute them across ALL pages between "start_page" and "end_page". "page_index" must be a valid 1-indexed page number within the bounds of "start_page" and "end_page". Use the student's language (English or Hindi) for the comment.
+IMPORTANT — COORDINATES:
+- If the student's OCR JSON contains a row for that ``question_id`` (even with empty ``student_answer``), copy that row's page bounds and marking positions into your output, and add annotations only across those pages.
+- If the student's OCR JSON has **no row at all** for that ``question_id`` (question not written on the copy), set ``start_page``, ``end_page``, ``marking_page``, all ``*_position_percent`` fields, and ``marking_*_position_percent`` to JSON ``null``, and set ``annotations`` to ``[]``. Do **not** guess page 1 or other placeholders.
+
+The "annotations" array: when the student did write an answer, include 1-3 spots per page spanned; ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for the comment.
 - For correct or good parts, set "is_positive": true.
 - For mistakes, wrong answers, or areas needing improvement, set "is_positive": false and provide a constructive comment correcting the student.
 
@@ -217,6 +220,24 @@ _GRADING_KEYS = (
     "annotations",
 )
 
+# OCR layout fields — absent when this question never appeared in the structure pass output.
+_ABSENT_FROM_OCR_COORD_KEYS = (
+    "start_page",
+    "end_page",
+    "marking_page",
+    "start_y_position_percent",
+    "end_y_position_percent",
+    "marking_x_position_percent",
+    "marking_y_position_percent",
+)
+
+
+def _nullify_coordinates_for_absent_student_row(row: dict[str, Any]) -> None:
+    """Teacher-only evaluations for questions missing from OCR have no drawable bounds."""
+    for k in _ABSENT_FROM_OCR_COORD_KEYS:
+        row[k] = None
+    row["annotations"] = []
+
 
 def _norm_question_id(value: Any) -> int | None:
     if value is None:
@@ -279,6 +300,7 @@ def merge_evaluations_into_items(
         if "is_attempted" not in row:
             st = str(row.get("status") or "").lower()
             row["is_attempted"] = st not in ("", "unattempted")
+        _nullify_coordinates_for_absent_student_row(row)
         merged.append(row)
 
     merged.sort(
