@@ -34,8 +34,10 @@ class QuestionPageMarksItem(BaseModel):
 
 
 class BulkQuestionPageMarksPayload(BaseModel):
+    """Client sends snake_case ``intro_page``. ``items`` may be omitted when only updating intro page."""
+
     modelKey: str = Field(min_length=1)
-    items: list[QuestionPageMarksItem]
+    items: list[QuestionPageMarksItem] = Field(default_factory=list)
     intro_page: int | None = Field(default=None, ge=1)
 
 

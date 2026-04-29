@@ -406,7 +406,7 @@ def bulk_patch_answer_model_question_page_marks(
     """
     with get_conn() as db:
         row = db.execute(
-            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
+            "SELECT questions_json, intro_page FROM answer_models WHERE id = ? AND owner_user_id = ?",
             (model_id, owner_user_id),
         ).fetchone()
         if not row:
