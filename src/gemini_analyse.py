@@ -96,6 +96,15 @@ _COMBINED_SCHEMA = types.Schema(
 )
 
 
+FEEDBACK_TONE_BLOCK = """
+FEEDBACK VOICE — UPSC MAINS SCRIPT MENTOR (NOT COACH CHEERLEADING):
+- Comments and bullet feedback read like examiner + senior tutor: restrained, rigorous, usefulness-first.
+- Ban empty superlatives and blanket praise ('Excellent answer', 'Outstanding', 'Very well written' without diagnosis).
+- good_points: only **specific**, mark-earning virtues (with a terse why they matter versus a generic script).
+- improvements plus annotation comments: lead with gaps, sharper structure, absent dimension, factual precision, illustrative depth — show how to climb the marking ladder next.
+- Maintain respect; warmth is spare — encouragement comes through clarity of next steps.
+"""
+
 MARKING_RULES_BLOCK = """
 MARKING RULES (NON-NEGOTIABLE):
 - NEVER exceed total_marks.
@@ -122,6 +131,7 @@ ANNOTATION PLACEMENT RULES:
 - Spread across pages — do not cluster on page 0.
 - Density: roughly 2–4 annotations per handwritten page when the answer is substantive; proportionally fewer on sparse pages.
 - Cover the answer structure in comments: aim for annotations on opening/introduction framing, middle argument or evidence, and closing/conclusion synthesis (adapt to whatever structure the student actually wrote).
+- Comment wording: UPSC script-mentor tone — spare praise, high diagnostic yield; use is_positive true only for genuinely distinctive merits.
 """
 
 
@@ -131,14 +141,14 @@ LANGUAGE (Hindi, language=hi):
 - All feedback strings (good_points, improvements, final_review, annotation comments) MUST be in Hindi.
 - Use formal address: "Aap/Aapka"; avoid "Tum/Tumne".
 - Prefer formal terms (e.g. Prastavana/Parichay for introduction where appropriate).
-- Avoid casual praise like "Shabash".
+- Avoid casual praise like "Shabash" and exaggerated appreciation; tone = गंभीर मार्गदर्शक परीक्षक (संयत, विश्लेषणात्मक).
 """
 
 
 def _en_language_block() -> str:
     return """
 LANGUAGE (English, language=en):
-- All feedback strings must be in English only.
+- All feedback strings must be in English only — formal, mains-exam tone; no slangy hype or empty praise clusters.
 """
 
 
@@ -166,7 +176,7 @@ def build_analyse_prompt(
         else "You are given cached OCR text of the student's answer (no images). "
         "Use it as the student_text basis and grade accordingly."
     )
-    return f"""You are an expert examiner. Grade the student's answer against the marking scheme.
+    return f"""You are a senior examiner acting as UPSC mains script mentor — grade against the marking scheme with professional, restrained feedback.
 
 {ocr_note}
 
@@ -181,6 +191,8 @@ TOTAL MARKS FOR THIS QUESTION: {total_marks}
 
 {MARKING_RULES_BLOCK}
 
+{FEEDBACK_TONE_BLOCK}
+
 {ANNOTATION_RULES_BLOCK}
 
 {lang_rules}
@@ -191,7 +203,7 @@ OUTPUT: Return ONE JSON object only (no markdown) with keys:
 - confidence_percent: number, 0–100, your confidence in this grading.
 - good_points: string, bullet points with leading "• " lines, teacher-style strengths.
 - improvements: string, bullet points with "• ", teacher-style improvements.
-- final_review: string, 2–3 sentences overall remark (handwritten-note style).
+- final_review: string, 2–4 sentences overall remark — examiner summary: measured verdict + priority fixes; avoid gushing praise.
 - annotations: array of objects, each with:
   page_index (0-based), y_position_percent, x_start_percent, x_end_percent, comment, is_positive (boolean), line_style ("straight" or "zigzag").
 
@@ -202,13 +214,13 @@ Ensure annotations follow placement rules and match the answer content.
 
 
 def build_combined_prompt(question_results_json: str) -> str:
-    return f"""You are an experienced teacher writing an end-of-paper summary for a student.
+    return f"""You are a UPSC mains mentor drafting an integrated paper critique — examiner-like, restrained, diagnostically dense. Do not fluff or over-praise; synthesise patterns and actionable priorities.
 
 PER-QUESTION RESULTS (JSON):
 {question_results_json}
 
 TASK:
-1. Write final_review: one long flowing paragraph (~150–220 words). Match the dominant language of the improvements/good_points text below (Hindi vs English). Use \\n between sentences if helpful.
+1. Write final_review: one long flowing paragraph (~150–220 words). Match the dominant language of the improvements/good_points text below (Hindi vs English). Use \\n between sentences if helpful. Acknowledge competence briefly where merited; weight the paragraph toward systematic gaps and how to tighten answer-writing for marks.
 2. Write overall_improvements: exactly 4 plain improvement sentences, one per line, separated by \\n.
 3. Write one_thing_to_write: one sentence — the single most impactful practice tip.
 
