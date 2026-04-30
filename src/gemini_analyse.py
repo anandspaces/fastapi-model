@@ -120,7 +120,8 @@ ANNOTATION PLACEMENT RULES:
 - Opposite sides on same page can share similar y positions.
 - Left half: x_end_percent ≤ 55. Right half: x_start_percent ≥ 45.
 - Spread across pages — do not cluster on page 0.
-- Max 2–3 annotations per page.
+- Density: roughly 2–4 annotations per handwritten page when the answer is substantive; proportionally fewer on sparse pages.
+- Cover the answer structure in comments: aim for annotations on opening/introduction framing, middle argument or evidence, and closing/conclusion synthesis (adapt to whatever structure the student actually wrote).
 """
 
 
@@ -193,6 +194,8 @@ OUTPUT: Return ONE JSON object only (no markdown) with keys:
 - final_review: string, 2–3 sentences overall remark (handwritten-note style).
 - annotations: array of objects, each with:
   page_index (0-based), y_position_percent, x_start_percent, x_end_percent, comment, is_positive (boolean), line_style ("straight" or "zigzag").
+
+Produce **meaningful granularity**: for multi-paragraph answers use **at least 5 annotations** when page_count ≥ 2, otherwise **at least 3**. Put concrete strengths and fixes in annotation ``comment`` strings (not only in good_points/improvements). Prefer one annotation each for intro quality, central argument/example quality, and conclusion quality whenever those regions exist.
 
 Ensure annotations follow placement rules and match the answer content.
 """

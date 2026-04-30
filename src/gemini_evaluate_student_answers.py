@@ -119,7 +119,23 @@ IMPORTANT — COORDINATES:
 - Honour the layout intent encoded in marking coordinates from OCR: annotations and examiner marks belong in the handwritten answer zone — vertically below printed stem/handwriting divider and above page-foot rules; spread ``marking_y`` and annotation ``y_position_percent`` to avoid stacking on identical Y as the student's first printed line label.
 - If the student's OCR JSON has **no row at all** for that ``question_id`` (question not written on the copy), set ``start_page``, ``end_page``, ``marking_page``, all ``*_position_percent`` fields, and ``marking_*_position_percent`` to JSON ``null``, and set ``annotations`` to ``[]``. Do **not** guess page 1 or other placeholders.
 
-The "annotations" array: when the student did write an answer, include 1-3 spots per page spanned; ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for the comment.
+The "annotations" array — place **specific** examiner remarks **on** the student's content (preferred over cramming detail only into ``feedback``):
+
+When the student wrote a substantive answer (more than ~6–8 lines or multiple paragraphs across pages):
+- Emit **at least 4 annotations** total across all spanned pages (more when the answer is long or richly structured).
+- You **must cover three structural zones when each exists in the handwriting** — label each implicitly in wording, not brackets:
+  1) **Opening / introduction** — framing, definitions, roadmap, relevance to the question quality (positive or corrective).
+  2) **Body / core evidence** — main arguments, examples, logic, omissions vs marking scheme (one or two spots).
+  3) **Conclusion / synthesis** — how they closed: summary worthiness, link back to stem, takeaway; if they stop abruptly without closure, ``is_positive``: false and suggest briefly what a closing line could do.
+- If the introduction or conclusion zones are visibly missing from the handwritten answer, add an annotation in the nearest appropriate band (often lower on first / last answered page) saying what is lacking.
+
+For **short** answers (about 3 lines or less): emit **at least 2 annotations** anchored to concrete phrases.
+
+Across pages: distribute so the **first page with significant ink** tends to carry intro-related critique and the **last page with substantive writing** tends to carry conclusion-related critique unless structure clearly contradicts.
+
+Per page density: roughly **2–4** annotations on a page that carries dense handwriting; thinner pages proportionally fewer. Never exceed what vertical spacing allows below.
+
+Technical: ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for every ``comment``.
 - For correct or good parts, set "is_positive": true.
 - For mistakes, wrong answers, or areas needing improvement, set "is_positive": false and provide a constructive comment correcting the student.
 
