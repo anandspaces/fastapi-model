@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -51,6 +52,99 @@ def format_answer_model_as_teacher_instructions(
     return "\n".join(lines)
 
 
+def _norm_question_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def smart_ocr_auto_combined_review_enabled() -> bool:
+    """Env: SMART_OCR_AUTO_COMBINED_REVIEW=1 runs paper-level combined review after grading."""
+    raw = (os.getenv("SMART_OCR_AUTO_COMBINED_REVIEW", "") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def compact_student_rows_for_evaluation(
+    student_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One compact row per OCR question for stable alignment (includes blank attempts).
+
+    Keys separate stem vs response so the model does not treat the printed stem as the answer.
+    """
+    rows: list[dict[str, Any]] = []
+    for it in student_items:
+        qid = _norm_question_id(it.get("question_id"))
+        if qid is None:
+            continue
+        ans = str(it.get("student_answer", "") or "")
+        rows.append(
+            {
+                "question_id": qid,
+                "question_stem_ocr": str(it.get("question", "") or ""),
+                "student_answer_text": ans,
+                "has_handwritten_substance": bool(ans.strip()),
+                "start_page": it.get("start_page"),
+                "end_page": it.get("end_page"),
+                "marking_page": it.get("marking_page"),
+                "start_y_position_percent": it.get("start_y_position_percent"),
+                "end_y_position_percent": it.get("end_y_position_percent"),
+                "marking_x_position_percent": it.get("marking_x_position_percent"),
+                "marking_y_position_percent": it.get("marking_y_position_percent"),
+            }
+        )
+    return rows
+
+
+def graded_items_for_combined_review(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map merged graded items to the per-question shape used by ``generate_combined_review``."""
+    out: list[dict[str, Any]] = []
+    for it in items:
+        qid = _norm_question_id(it.get("question_id"))
+        if qid is None:
+            continue
+        if "marks_awarded" not in it:
+            continue
+        try:
+            ma = float(it.get("marks_awarded") or 0)
+        except (TypeError, ValueError):
+            ma = 0.0
+        try:
+            mm = int(it.get("max_marks") or 0)
+        except (TypeError, ValueError):
+            mm = 0
+        title = str(it.get("question", "")).strip() or f"Question {qid}"
+        fb = str(it.get("feedback") or "").strip()
+        fd = str(it.get("feedback_detail") or "").strip()
+        st = str(it.get("status") or "").lower()
+        if st == "correct" and ma > 0 and fb:
+            good = fb if fb.startswith("•") else f"• {fb}"
+        elif ma > 0:
+            good = f"• Awarded {ma:g}/{mm} marks. {fb}"[:400]
+        else:
+            good = "• No substantive marks." if not fb else (fb if fb.startswith("•") else f"• {fb}")
+        impr = fd if fd else fb
+        if impr and not impr.startswith("•"):
+            impr = f"• {impr}"
+        elif not impr:
+            impr = "• Review model answer and terminology."
+        fr = (fb + " " + fd).strip()[:500]
+        out.append(
+            {
+                "question_no": str(qid),
+                "title": title[:200],
+                "marks_awarded": ma,
+                "marks_total": mm,
+                "good_points": good,
+                "improvements": impr,
+                "final_review": fr or fb,
+            }
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
@@ -64,36 +158,56 @@ def _build_evaluation_prompt(
     return f"""You are a strict but fair {subject} teacher evaluating an exam paper. You have deep expertise in {subject} and will evaluate answers with subject-specific knowledge.
 
 You are given:
-1. TEACHER INSTRUCTIONS / MODEL KEY — the correct questions, answers, marks, or marking rules provided by the teacher.
-2. A STUDENT's OCR-extracted answers (student_answer) from their handwritten copy.
-   Rows with completely blank answers may be omitted from this JSON — you must still emit "unattempted" with 0 marks for every TEACHER question. Do not invent OCR text in ``student_answer_summary``.
+1. TEACHER INSTRUCTIONS / MODEL KEY — questions, model answers, marks, or marking rules.
+2. STUDENT OCR TABLE — JSON array of objects with:
+   - ``question_id``, ``question_stem_ocr``, ``student_answer_text``, ``has_handwritten_substance`` (see CRITICAL — STEM VS ANSWER).
+   - Layout fields when present from OCR: ``start_page``, ``end_page``, ``marking_page``, ``start_y_position_percent``, ``end_y_position_percent``, ``marking_x_position_percent``, ``marking_y_position_percent`` — copy these into your output for that question when the student row exists; use JSON ``null`` for any missing input field.
 
-Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answers. Find each question's matching student answer and award marks. Match the student's answer to the specific model key question by content or question number, even if the student answered them out of order (e.g. if the student answered Q5 first, match it to Q5 in the model key). If a question is present in the TEACHER INSTRUCTIONS but missing from the student's answers, it MUST be included in the output with a status of "unattempted" and 0 marks.
+CRITICAL — STEM VS ANSWER:
+- ``question_stem_ocr`` is NOT the student's answer. Never award marks for merely restating or copying the printed stem.
+- Grade ONLY substantive response content in ``student_answer_text``. If the stem is merged into that field by OCR, mentally separate boilerplate stem from the candidate's own reasoning, facts, and calculations.
+- ``student_answer_summary`` in your output must summarize **only** the student's response substance — not the stem alone.
+
+Your job: Grade against the TEACHER INSTRUCTIONS. Match by ``question_id`` / content. If a teacher question has **no** student row in the JSON (missing ``question_id``), treat as unattempted. If the row exists but ``has_handwritten_substance`` is false, status ``unattempted`` and 0 marks.
 
 MARKING RULES:
 - The `max_marks` in your output MUST exactly match the "MAX MARKS ALLOWED" for each question in the TEACHER INSTRUCTIONS.
 - Award `marks_awarded` as a DECIMAL in multiples of 0.5 (0, 0.5, 1, 1.5, ...).
-- NEVER EXCEED the "MAX MARKS ALLOWED" for a question. If a student's answer is perfect, give exactly the MAX MARKS ALLOWED.
-- CONCEPTUAL FLEXIBILITY: Evaluate with deep human intelligence! Do not blindly string-match; award full marks if the underlying meaning and logic is identical.
-- CONSTRUCTIVE FEEDBACK: The `feedback` string MUST explicitly reference the specific terms, concepts, or calculations in the student's answer. Limit it to maximum 20-35 words.
+- NEVER EXCEED the "MAX MARKS ALLOWED" for a question.
+- CONCEPTUAL FLEXIBILITY: Award full marks when meaning and logic match the key; do not require verbatim match.
+
+FEEDBACK:
+- ``feedback``: one concise paragraph (max ~40 words) — headline verdict referencing concrete terms from the student's answer.
+- ``feedback_detail``: 2–5 short sentences (or bullet lines separated by \\n) — specific gaps, errors, or strengths; **minute** diagnosis where relevant.
+- ``priority_improvement``: one sentence — the single highest-impact improvement for this question.
+- ``dimension_notes``: one string with lines or bullets covering what applies among: **argument**, **facts/content**, **structure/organisation**, **language/clarity** (skip lines that do not apply).
+- ``example_suggestion``: one sentence — one concrete example, illustration, or reference the student could add (aligned with the teacher key); empty string if not applicable.
+
+LONG / ESSAY ANSWERS:
+- If the answer spans multiple pages or reads like an essay, comment in ``feedback_detail`` whether the **conclusion** closes the argument (or if it trails off / repeats intro).
+- Prefer one annotation with ``y_position_percent`` in the **lower third** (roughly 66–95) of the **last page** of the answer when remarking on the conclusion or final paragraph.
 
 TEACHER INSTRUCTIONS / MODEL KEY ({subject}):
 {teacher_instructions}
 
-STUDENT'S EXTRACTED ANSWERS:
+STUDENT OCR TABLE (compact):
 {student_json}
 
-OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST output exactly ONE object for EVERY question defined in the TEACHER INSTRUCTIONS. Do not omit any questions.
+OUTPUT EXACTLY a JSON array — ONE object per question in the TEACHER INSTRUCTIONS (same order as listed there). Do not omit questions.
 
 [
   {{
     "question_id": 1,
-    "question": "The question text or summary",
+    "question": "Question summary for output",
     "max_marks": 5,
     "marks_awarded": 3.5,
-    "status": "correct",
-    "student_answer_summary": "Full text or summary of the student's answer",
-    "feedback": "Insightful specific feedback...",
+    "status": "partial",
+    "student_answer_summary": "Substantive response only — not stem alone",
+    "feedback": "Concise headline feedback...",
+    "feedback_detail": "Sentence one.\\nSentence two.",
+    "priority_improvement": "One sentence.",
+    "dimension_notes": "argument: ...\\nfacts: ...\\nstructure: ...",
+    "example_suggestion": "e.g. cite X or define Y",
     "start_page": 1,
     "start_y_position_percent": 10.0,
     "end_page": 2,
@@ -107,7 +221,7 @@ OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST ou
         "y_position_percent": 50.0,
         "x_start_percent": 20.0,
         "x_end_percent": 80.0,
-        "comment": "short teacher remark",
+        "comment": "specific remark",
         "is_positive": true
       }}
     ]
@@ -115,20 +229,17 @@ OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST ou
 ]
 
 IMPORTANT — COORDINATES:
-- If the student's OCR JSON contains a row for that ``question_id`` (even with empty ``student_answer``), copy that row's page bounds and marking positions into your output, and add annotations only across those pages.
-- If the student's OCR JSON has **no row at all** for that ``question_id`` (question not written on the copy), set ``start_page``, ``end_page``, ``marking_page``, all ``*_position_percent`` fields, and ``marking_*_position_percent`` to JSON ``null``, and set ``annotations`` to ``[]``. Do **not** guess page 1 or other placeholders.
+- If the student OCR table contains a row for that ``question_id`` (including blank ``student_answer_text``), copy the layout fields from that row into your output (use nulls where the input had null).
+- If there was **no** OCR row for that ``question_id`` in the table, set ``start_page``, ``end_page``, ``marking_page``, all ``*_position_percent`` fields to JSON ``null`` and ``annotations`` to ``[]``. Do not guess page 1.
 
-The "annotations" array: when the student did write an answer, include 1-3 spots per page spanned; ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for the comment.
-- For correct or good parts, set "is_positive": true.
-- For mistakes, wrong answers, or areas needing improvement, set "is_positive": false and provide a constructive comment correcting the student.
+Annotations when the student wrote something: 1–3 per page spanned; ``page_index`` between ``start_page`` and ``end_page``. Match student's language.
 
 CRITICAL JSON FORMATTING RULES:
-- You must ONLY output a valid JSON array.
-- DO NOT use unescaped double quotes inside string values (use ' or escape them).
-- DO NOT use literal newlines inside string values (use \\n).
-- Make sure every object and array is properly closed.
+- Output ONLY a valid JSON array.
+- Escape quotes inside strings; use \\n for newlines inside strings.
 
-CRITICAL PLACEMENT RULE: When placing annotations, ensure their "y_position_percent" values are well separated (at least 15% apart) from each other AND from the final "marking_y_position_percent" on the same page. This prevents text overlap in the UI.
+CRITICAL PLACEMENT RULE: Space ``y_position_percent`` on the same page at least 15% apart from each other and from ``marking_y_position_percent``.
+
 Status must be one of: "correct", "partial", "wrong", "unattempted".
 """
 
@@ -163,7 +274,16 @@ def _regex_extract_evaluations(text: str) -> list[dict[str, Any]]:
         if m:
             item["question_id"] = int(m.group(1))
 
-        for field in ("question", "status", "student_answer_summary", "feedback"):
+        for field in (
+            "question",
+            "status",
+            "student_answer_summary",
+            "feedback",
+            "feedback_detail",
+            "priority_improvement",
+            "dimension_notes",
+            "example_suggestion",
+        ):
             fm = re.search(rf'"{field}"\s*:\s*"((?:[^"\\]|\\.)*)', block, re.DOTALL)
             item[field] = (
                 fm.group(1).replace(r"\"", '"').replace(r"\n", "\n").strip()
@@ -217,6 +337,10 @@ _GRADING_KEYS = (
     "status",
     "student_answer_summary",
     "feedback",
+    "feedback_detail",
+    "priority_improvement",
+    "dimension_notes",
+    "example_suggestion",
     "annotations",
 )
 
@@ -237,29 +361,6 @@ def _nullify_coordinates_for_absent_student_row(row: dict[str, Any]) -> None:
     for k in _ABSENT_FROM_OCR_COORD_KEYS:
         row[k] = None
     row["annotations"] = []
-
-
-def _norm_question_id(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def item_is_attempted_for_grading(item: dict[str, Any]) -> bool:
-    """True if OCR has substantive answer text worth sending to Gemini for grading."""
-    if item.get("is_attempted") is False:
-        return False
-    return bool(str(item.get("student_answer", "") or "").strip())
-
-
-def student_items_for_grading(
-    student_items: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Subset passed to Gemini. Blank / unattempted rows are graded as unattempted without LLM fabricating feedback."""
-    return [it for it in student_items if item_is_attempted_for_grading(it)]
 
 
 def merge_evaluations_into_items(
@@ -329,13 +430,14 @@ def evaluate_student_answers_against_model(
     Returns a list of evaluation dicts (one per teacher question).
     Raises ValueError if all attempts fail and regex fallback is also empty.
     """
-    student_json = json.dumps(student_items, ensure_ascii=False)
+    compact = compact_student_rows_for_evaluation(student_items)
+    student_json = json.dumps(compact, ensure_ascii=False)
     prompt = _build_evaluation_prompt(subject, teacher_instructions, student_json)
 
     client = genai.Client(api_key=api_key)
     cfg = types.GenerateContentConfig(
         temperature=0.1,
-        max_output_tokens=8192,
+        max_output_tokens=12288,
         response_mime_type="application/json",
     )
 
