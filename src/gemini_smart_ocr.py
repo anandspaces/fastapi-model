@@ -26,15 +26,6 @@ from src.gemini_extract import MODEL_ID
 
 log = logging.getLogger(__name__)
 
-# Phase 1: up to this many ThreadPool workers; each task processes up to N pages per Gemini call.
-SMART_OCR_PHASE1_MAX_WORKERS = 10
-SMART_OCR_PHASE1_PAGES_PER_BATCH = 2
-# Phase 2 (structure): up to this many parallel Gemini structure calls on page chunks.
-SMART_OCR_STRUCTURE_MAX_WORKERS = 10
-
-# After batch classify+OCR, re-run type-focused OCR only for these page types.
-_PAGE_TYPES_NEEDING_REOCR = frozenset({"CORRECTION", "WORD_LIST"})
-
 
 def _env_bool(name: str, default: bool = True) -> bool:
     raw = (os.getenv(name, "") or "").strip().lower()
@@ -321,126 +312,11 @@ def _structure_item_sort_key(item: dict[str, Any]) -> tuple[int | float, ...]:
         return (sp, sy, 999998)
 
 
-def _overlapping_page_chunk_ranges(
-    n_pages: int, num_chunks: int
-) -> list[tuple[int, int]]:
-    """Split ``pages`` indices [0, n_pages) into contiguous slices with 1-page overlap.
-
-    Returns half-open (start, end) ranges into the ``pages`` list (0-based).
-    """
-    if n_pages <= 0 or num_chunks <= 0:
-        return []
-    k = min(num_chunks, n_pages)
-    if k <= 1:
-        return [(0, n_pages)]
-    base = n_pages // k
-    rem = n_pages % k
-    starts: list[int] = []
-    ends: list[int] = []
-    pos = 0
-    for i in range(k):
-        sz = base + (1 if i < rem else 0)
-        starts.append(pos)
-        pos += sz
-        ends.append(pos)
-    out: list[tuple[int, int]] = []
-    for i in range(k):
-        s = starts[i] if i == 0 else max(0, starts[i] - 1)
-        e = ends[i]
-        out.append((s, e))
-    return out
-
-
-def _merge_structure_rows_by_question_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge parallel / overlapping structure chunks: same question_id → concat student_answer.
-
-    Overlapping windows can both include text from the shared boundary page; joining with
-    ``\\n\\n`` may therefore duplicate a stretch of answer text. Fixing that would need
-    overlap-aware dedup (e.g. trimming a repeated suffix/prefix), not done here.
-    """
-    rows.sort(key=_structure_item_sort_key)
-    by_id: dict[int, list[dict[str, Any]]] = {}
-    no_id: list[dict[str, Any]] = []
-    for item in rows:
-        qid = item.get("question_id")
-        if isinstance(qid, int):
-            by_id.setdefault(qid, []).append(item)
-        else:
-            no_id.append(item)
-
-    merged: list[dict[str, Any]] = []
-    for qid in sorted(by_id.keys()):
-        group = by_id[qid]
-        group.sort(key=_structure_item_sort_key)
-        if len(group) == 1:
-            merged.append(group[0])
-            continue
-        base = dict(group[0])
-        parts = [
-            str(g.get("student_answer", "")).strip()
-            for g in group
-            if str(g.get("student_answer", "")).strip()
-        ]
-        base["student_answer"] = "\n\n".join(parts)
-        qs = [str(g.get("question", "")) for g in group]
-        base["question"] = max(qs, key=len) if qs else base.get("question", "")
-        base["start_page"] = min(int(g.get("start_page", 1)) for g in group)
-        base["start_y_position_percent"] = min(
-            float(g.get("start_y_position_percent", 0.0)) for g in group
-        )
-        base["end_page"] = max(int(g.get("end_page", 1)) for g in group)
-        base["end_y_position_percent"] = max(
-            float(g.get("end_y_position_percent", 0.0)) for g in group
-        )
-        best_mk = max(
-            group,
-            key=lambda x: (
-                int(x.get("end_page", 0)),
-                float(x.get("end_y_position_percent", 0.0)),
-            ),
-        )
-        base["marking_page"] = best_mk.get("marking_page")
-        base["marking_x_position_percent"] = best_mk.get("marking_x_position_percent")
-        base["marking_y_position_percent"] = best_mk.get("marking_y_position_percent")
-        merged.append(base)
-
-    merged.extend(no_id)
-    merged.sort(key=_structure_item_sort_key)
-    return merged
-
-
 _OCR_PAGE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={"text": types.Schema(type=types.Type.STRING)},
     required=["text"],
     property_ordering=["text"],
-)
-
-_BATCH_PAGE_ROW_SCHEMA = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "page": types.Schema(type=types.Type.INTEGER, description="Physical 1-based page index."),
-        "page_type": types.Schema(
-            type=types.Type.STRING,
-            description="DUPLICATE, CORRECTION, PARAGRAPH, WORD_LIST, or UNKNOWN.",
-        ),
-        "text": types.Schema(type=types.Type.STRING, description="Verbatim OCR for this page."),
-    },
-    required=["page", "page_type", "text"],
-    property_ordering=["page", "page_type", "text"],
-)
-
-_CLASSIFY_AND_OCR_BATCH_SCHEMA = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "pages": types.Schema(
-            type=types.Type.ARRAY,
-            items=_BATCH_PAGE_ROW_SCHEMA,
-            description="One entry per image, in the same order as the prompt images.",
-        ),
-    },
-    required=["pages"],
-    property_ordering=["pages"],
 )
 
 
@@ -457,8 +333,6 @@ def _strip_json_fence(text: str) -> str:
 def _repair_json(text: str) -> str:
     t = _strip_json_fence(text)
     t = re.sub(r",\s*([}\]])", r"\1", t)
-    # Best-effort quote balance: stripping \\X removes escapes but can miscount if a value
-    # ends with an odd number of backslashes (rare in OCR).
     stripped = re.sub(r"\\.", "", t)
     if stripped.count('"') % 2 != 0:
         t += '"'
@@ -514,44 +388,26 @@ def _normalize_answer_type(raw: Any) -> str:
 
 
 def _estimate_expected_questions(page_blocks: list[str]) -> int | None:
-    """Heuristic: infer approximate question count from visible numbering labels.
-
-    Prefer explicit question markers (Q/Que/Question/प्रश्न). The generic ``1. foo`` line
-    pattern is used only when none of those match, so numbered sub-points inside an answer
-    do not inflate ``max()`` when headers like Que:5 exist elsewhere.
-    """
-    strong_patterns = (
+    """Heuristic: infer approximate question count from visible numbering labels."""
+    nums: set[int] = set()
+    patterns = (
         r"\bq(?:uestion)?\s*[:.\-]?\s*(\d{1,3})\b",
-        r"\bque\s*[:]?\s*(\d{1,3})\b",
+        r"(?:^|\n)\s*\(?(\d{1,3})\)?\s*[.)\-:]\s+",
         r"(?:प्रश्न|उ\.?\s*प्र\.?)\s*[:.\-]?\s*(\d{1,3})\b",
     )
-    weak_pattern = r"(?:^|\n)\s*\(?(\d{1,3})\)?\s*[.)\-:]\s+"
-    strong: set[int] = set()
-    weak: set[int] = set()
     for block in page_blocks:
         body = _extract_page_body(block)
-        if "[OMITTED:" in body:
-            continue
-        for pat in strong_patterns:
+        for pat in patterns:
             for m in re.finditer(pat, body, flags=re.IGNORECASE):
                 try:
                     n = int(m.group(1))
                 except (TypeError, ValueError):
                     continue
                 if 1 <= n <= 200:
-                    strong.add(n)
-        for m in re.finditer(weak_pattern, body):
-            try:
-                n = int(m.group(1))
-            except (TypeError, ValueError):
-                continue
-            if 1 <= n <= 200:
-                weak.add(n)
-    if strong:
-        return max(strong)
-    if weak:
-        return max(weak)
-    return None
+                    nums.add(n)
+    if not nums:
+        return None
+    return max(nums)
 
 
 def _normalize_flat_item(
@@ -684,11 +540,7 @@ def _deduplicate_page_texts(
     *,
     sim_threshold: float = 0.92,
 ) -> list[str]:
-    """Drop near-duplicate page bodies; keep === PAGE n === headers for stable numbering.
-
-    Similarity compares each page only to its immediate predecessor (not i-2); distant
-    duplicates rely on the DUPLICATE classifier.
-    """
+    """Drop near-duplicate page bodies; keep === PAGE n === headers for stable numbering."""
     out = list(page_blocks)
     for i in range(len(out)):
         page_no = i + 1
@@ -776,191 +628,6 @@ def _ocr_single_page(
     return f"=== PAGE {page_num} ===\n{page_text}"
 
 
-def _parse_classify_ocr_batch_json(raw: str, expected_pages: list[int]) -> dict[int, tuple[str, str]]:
-    """Map physical page number -> (page_type, ocr_text_body without header)."""
-    want = set(expected_pages)
-    found: dict[int, tuple[str, str]] = {}
-    for candidate in (_strip_json_fence(raw), _repair_json(raw)):
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        rows = parsed.get("pages")
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                pno = int(row.get("page"))
-            except (TypeError, ValueError):
-                continue
-            if pno not in want:
-                continue
-            pt = _coerce_page_type(str(row.get("page_type", "UNKNOWN")))
-            text = str(row.get("text", "")).strip()
-            found[pno] = (pt, text)
-        if len(found) >= len(want):
-            break
-    return found
-
-
-def _classify_and_ocr_pages_gemini_batch(
-    api_key: str,
-    png_pages: list[bytes],
-    indices: list[int],
-    total_pages: int,
-    language: str,
-    *,
-    run_classify: bool,
-    request_id: str,
-) -> dict[int, tuple[str, str]]:
-    """One Gemini call for 1–2 consecutive pages. Returns map page_no -> (page_type, text body)."""
-    page_nums = [i + 1 for i in indices]
-    client = genai.Client(api_key=api_key)
-    lang = (language or "en").strip().lower()
-    script_note = (
-        "Preserve Hindi (Devanagari) and English exactly — do NOT transliterate."
-        if lang == "hi"
-        else "Preserve English and Hindi exactly — do NOT transliterate."
-    )
-    cls_hint = (
-        "For each image, choose page_type: DUPLICATE, CORRECTION, PARAGRAPH, WORD_LIST, UNKNOWN "
-        "(same meanings as before)."
-        if run_classify
-        else 'Set page_type to "UNKNOWN" for every page (classification skipped).'
-    )
-    lines = [
-        f"You are given {len(indices)} consecutive page image(s) from a handwritten exam answer book "
-        f"(total document pages: {total_pages}).",
-        "",
-        "For EACH image in order:",
-        cls_hint,
-        "Then transcribe ALL visible text exactly as written for that page.",
-        "- Preserve line breaks; keep Q1 / प्रश्न labels; use [illegible] for unreadable spans.",
-        f"- {script_note}",
-        "",
-        "Return ONLY JSON: {\"pages\":[{\"page\":<physical page number>,\"page_type\":\"...\",\"text\":\"...\"}, ...]}",
-        "The \"pages\" array MUST have exactly one object per image, in image order.",
-        "Physical page numbers for this batch: " + ", ".join(str(p) for p in page_nums),
-    ]
-    prompt = "\n".join(lines)
-    parts: list[Any] = [types.Part.from_text(text=prompt)]
-    for idx in indices:
-        pno = idx + 1
-        parts.append(types.Part.from_text(text=f"[PAGE {pno} IMAGE]"))
-        parts.append(types.Part.from_bytes(data=png_pages[idx], mime_type="image/png"))
-    cfg = types.GenerateContentConfig(
-        temperature=0.0,
-        max_output_tokens=16384,
-        response_mime_type="application/json",
-        response_schema=_CLASSIFY_AND_OCR_BATCH_SCHEMA,
-    )
-    last_raw = ""
-    got: dict[int, tuple[str, str]] = {}
-    for attempt in range(1, 3):
-        resp = client.models.generate_content(
-            model=MODEL_ID,
-            contents=parts,
-            config=cfg,
-        )
-        last_raw = (getattr(resp, "text", None) or "").strip()
-        if not last_raw:
-            if attempt < 2:
-                time.sleep(0.5)
-            continue
-        got = _parse_classify_ocr_batch_json(last_raw, page_nums)
-        if len(got) >= len(page_nums):
-            return got
-        if attempt < 2:
-            time.sleep(0.5)
-    log.warning(
-        "smart_ocr[%s] batch classify+ocr incomplete pages=%s got=%s raw=%r",
-        request_id,
-        page_nums,
-        list(got.keys()),
-        last_raw[:300],
-    )
-    raise ValueError(f"batch OCR parse incomplete for pages {page_nums}")
-
-
-def _phase1_fallback_single_pages(
-    api_key: str,
-    png_pages: list[bytes],
-    indices: list[int],
-    total_pages: int,
-    language: str,
-    *,
-    run_classify: bool,
-) -> dict[int, tuple[str, str]]:
-    """Sequential fallback: classify + OCR per page using existing helpers."""
-    out: dict[int, tuple[str, str]] = {}
-    for idx in indices:
-        pno = idx + 1
-        pt = "UNKNOWN"
-        if run_classify:
-            try:
-                pt = _classify_page(api_key, png_pages[idx], pno, total_pages, language)
-            except Exception:
-                pt = "UNKNOWN"
-        block = _ocr_single_page(
-            api_key, png_pages[idx], pno, total_pages, language, pt
-        )
-        body = _extract_page_body(block)
-        out[pno] = (pt, body)
-    return out
-
-
-def _phase1_reocr_focused_page_types(
-    api_key: str,
-    png_pages: list[bytes],
-    classifications: list[str],
-    page_blocks: list[str],
-    total_pages: int,
-    language: str,
-    request_id: str,
-) -> None:
-    """Replace batch OCR with type-focused prompts for CORRECTION / WORD_LIST (in-place).
-
-    Call after dedup so pages collapsed to ``[OMITTED:…]`` are skipped. Workers write
-    distinct indices of ``page_blocks``; safe under CPython (do not use ``ProcessPoolExecutor``
-    without copying arrays).
-    """
-    need = [
-        i
-        for i, pt in enumerate(classifications)
-        if pt in _PAGE_TYPES_NEEDING_REOCR
-        and "[OMITTED:" not in _extract_page_body(page_blocks[i])
-    ]
-    if not need:
-        return
-    max_w = min(SMART_OCR_PHASE1_MAX_WORKERS, max(1, len(need)))
-
-    def _reocr_job(i: int) -> tuple[int, str]:
-        pno = i + 1
-        pt = classifications[i]
-        block = _ocr_single_page(
-            api_key, png_pages[i], pno, total_pages, language, pt
-        )
-        log.info(
-            "smart_ocr[%s] re-ocr focused page=%s/%s class=%s chars=%s",
-            request_id,
-            pno,
-            total_pages,
-            pt,
-            len(block),
-        )
-        return i, block
-
-    with ThreadPoolExecutor(max_workers=max_w) as pool:
-        futs = [pool.submit(_reocr_job, i) for i in need]
-        for fut in as_completed(futs):
-            idx, block = fut.result()
-            page_blocks[idx] = block
-
-
 def _structure_qa(
     client: genai.Client,
     pages_payload_json: str,
@@ -968,10 +635,6 @@ def _structure_qa(
     total_pages: int,
     *,
     expected_questions: int | None = None,
-    chunk_index: int | None = None,
-    chunk_count: int | None = None,
-    page_span: tuple[int, int] | None = None,
-    overlapping_chunks: bool = False,
 ) -> list[dict[str, Any]]:
     lang_note = (
         "Text is Hindi/English mixed; preserve wording in student_answer when present."
@@ -984,40 +647,13 @@ def _structure_qa(
         if expected_questions
         else ""
     )
-    chunk_note = ""
-    if (
-        chunk_index is not None
-        and chunk_count is not None
-        and page_span is not None
-    ):
-        lo, hi = page_span
-        overlap_extra = ""
-        if overlapping_chunks:
-            overlap_extra = (
-                "Adjacent chunks overlap by ONE physical page at boundaries; the same question_id "
-                "may appear in two chunks with partial text — emit only what is visible in THIS "
-                "slice's pages; the server merges rows with the same question_id.\n"
-            )
-        chunk_note = (
-            f"\nPARALLEL CHUNK ({chunk_index + 1} of {chunk_count}): "
-            f"The JSON lists ONLY physical pages {lo}–{hi} of the full {total_pages}-page book.\n"
-            f"{overlap_extra}"
-            "Extract every top-level question whose printed label (Q/Que/प्रश्न…) OR substantive "
-            "answer text appears in this slice.\n"
-            "- If a question starts on an earlier page and only continues here, include it using "
-            "only text visible in these pages.\n"
-            "- If a question starts here and continues on a later page, include stem + only the "
-            "answer portion visible here.\n"
-            "- Do not skip a question that is only partially visible here; partial rows are OK when "
-            "windows overlap.\n\n"
-        )
     prompt = f"""You are structuring a handwritten exam answer book from OCR text only.
 
 Input is JSON with this shape:
 {{"pages":[{{"page":1,"text":"..."}}, ...]}}
 where page numbers are physical page numbers 1..{total_pages}.
 
-{chunk_note}PHASE 2 ONLY (this structure pass) — SEGREGATE INTRO / COVER / ADMIN SHEETS:
+PHASE 2 ONLY (this structure pass) — SEGREGATE INTRO / COVER / ADMIN SHEETS:
 The prior OCR pass transcribed every page verbatim. Here you must IGNORE front-matter
 when building graded answer rows:
 - Typical non-answer pages: candidate particulars, roll/barcode, serial seals, instructions
@@ -1132,94 +768,21 @@ def _structure_qa_with_fallback(
     total_pages: int,
     *,
     expected_questions: int | None = None,
-    request_id: str = "",
 ) -> list[dict[str, Any]]:
-    pages = pages_payload.get("pages")
-    if not isinstance(pages, list) or not pages:
-        return []
-
-    def undercount(rows: list[dict[str, Any]]) -> bool:
-        if not expected_questions:
-            return False
-        return len(rows) < max(1, int(expected_questions * 0.8))
-
-    n_pages = len(pages)
-    max_w = SMART_OCR_STRUCTURE_MAX_WORKERS
-
-    if n_pages <= 3 or max_w <= 1:
-        pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
-        rows = _structure_qa(
-            client,
-            pages_payload_json,
-            language,
-            total_pages,
-            expected_questions=expected_questions,
-        )
-    else:
-        num_chunks = min(max_w, n_pages)
-        ranges = _overlapping_page_chunk_ranges(n_pages, num_chunks)
-        chunk_specs: list[dict[str, Any]] = []
-        for i, (s, e) in enumerate(ranges):
-            sub = pages[s:e]
-            lo = int(sub[0].get("page", s + 1)) if sub else s + 1
-            hi = int(sub[-1].get("page", e)) if sub else e
-            chunk_specs.append(
-                {
-                    "payload": {"pages": sub},
-                    "page_span": (lo, hi),
-                    "chunk_index": i,
-                }
-            )
-        k_actual = len(chunk_specs)
-
-        def run_chunk(spec: dict[str, Any]) -> list[dict[str, Any]]:
-            return _structure_qa(
-                client,
-                json.dumps(spec["payload"], ensure_ascii=False),
-                language,
-                total_pages,
-                expected_questions=None,
-                chunk_index=spec["chunk_index"],
-                chunk_count=k_actual,
-                page_span=spec["page_span"],
-                overlapping_chunks=True,
-            )
-
-        merged: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=k_actual) as pool:
-            futs = [pool.submit(run_chunk, spec) for spec in chunk_specs]
-            for fut in as_completed(futs):
-                merged.extend(fut.result())
-        rows = _merge_structure_rows_by_question_id(merged)
-        log.info(
-            "smart_ocr[%s] structure parallel overlapping_chunks=%s merged_questions=%s",
-            request_id,
-            k_actual,
-            len(rows),
-        )
-
-    if undercount(rows):
-        log.warning(
-            "smart_ocr[%s] structure undercount got=%s expected~=%s; retry full document",
-            request_id,
-            len(rows),
-            expected_questions,
-        )
-        pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
-        rows = _structure_qa(
-            client,
-            pages_payload_json,
-            language,
-            total_pages,
-            expected_questions=expected_questions,
-        )
-
-    if undercount(rows):
-        if len(pages) < 2:
+    pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
+    rows = _structure_qa(
+        client,
+        pages_payload_json,
+        language,
+        total_pages,
+        expected_questions=expected_questions,
+    )
+    if expected_questions and len(rows) < max(1, int(expected_questions * 0.8)):
+        pages = pages_payload.get("pages", [])
+        if not isinstance(pages, list) or len(pages) < 2:
             return rows
         log.warning(
-            "smart_ocr[%s] structure still undercount got=%s expected~=%s; retry split mid",
-            request_id,
+            "structure_qa undercount got=%s expected~%s; retry split",
             len(rows),
             expected_questions,
         )
@@ -1240,7 +803,16 @@ def _structure_qa_with_fallback(
             total_pages,
             expected_questions=None,
         )
-        rows = _merge_structure_rows_by_question_id(rows1 + rows2)
+        rows = rows1 + rows2
+        rows.sort(key=_structure_item_sort_key)
+        seen_ids: set[Any] = set()
+        deduped: list[dict[str, Any]] = []
+        for item in rows:
+            qid = item.get("question_id")
+            if qid not in seen_ids:
+                deduped.append(item)
+                seen_ids.add(qid)
+        rows = deduped
     return rows
 
 
@@ -1254,7 +826,7 @@ def smart_ocr_extract_student_answers(
     *,
     request_id: str,
 ) -> dict[str, Any]:
-    """Batch classify+OCR → dedupe → targeted re-OCR (CORRECTION/WORD_LIST) → structure into items.
+    """Classify pages → type-aware OCR → dedupe → structure into items.
 
     Cover / intro segregation is done in the structure (phase 2) Gemini pass — not here.
 
@@ -1275,97 +847,69 @@ def smart_ocr_extract_student_answers(
     # Smart OCR needs better handwritten fidelity on long copies; enforce a higher floor.
     dpi = max(220, copy_ocr_raster_dpi())
     png_pages = rasterize_pdf_to_png_pages(pdf_path, dpi=dpi, request_id=request_id)
+    max_workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
 
-    # --- Phase 1: up to 10 workers; each Gemini call carries up to 2 consecutive pages ---
     classifications: list[str] = ["UNKNOWN"] * total_pages
-    page_blocks: list[str] = [""] * total_pages
 
-    batches: list[list[int]] = []
-    idx = 0
-    while idx < total_pages:
-        batch = [idx]
-        if idx + 1 < total_pages:
-            batch.append(idx + 1)
-        batches.append(batch)
-        idx += len(batch)
-
-    phase1_workers = min(SMART_OCR_PHASE1_MAX_WORKERS, max(1, len(batches)))
-
-    def _phase1_batch(indices: list[int]) -> tuple[list[int], dict[int, tuple[str, str]]]:
+    def _classify_job(idx: int) -> tuple[int, str]:
+        pno = idx + 1
+        if not run_classify:
+            return idx, "UNKNOWN"
         try:
-            got = _classify_and_ocr_pages_gemini_batch(
-                api_key,
-                png_pages,
-                indices,
-                total_pages,
-                language,
-                run_classify=run_classify,
-                request_id=request_id,
+            label = _classify_page(
+                api_key, png_pages[idx], pno, total_pages, language
             )
+            log.info(
+                "smart_ocr[%s] classify page=%s/%s -> %s",
+                request_id,
+                pno,
+                total_pages,
+                label,
+            )
+            return idx, label
         except Exception as e:
             log.warning(
-                "smart_ocr[%s] batch classify+ocr failed pages=%s: %s; fallback per-page",
+                "smart_ocr[%s] classify failed page=%s: %s",
                 request_id,
-                [i + 1 for i in indices],
+                pno,
                 e,
             )
-            got = _phase1_fallback_single_pages(
-                api_key,
-                png_pages,
-                indices,
-                total_pages,
-                language,
-                run_classify=run_classify,
-            )
-        return indices, got
+            return idx, "UNKNOWN"
 
-    with ThreadPoolExecutor(max_workers=phase1_workers) as pool:
-        futs = [pool.submit(_phase1_batch, b) for b in batches]
-        for fut in as_completed(futs):
-            indices, got = fut.result()
-            for i in indices:
-                pno = i + 1
-                src = got
-                if pno not in src:
-                    log.warning(
-                        "smart_ocr[%s] missing page %s in batch; fallback per-page",
-                        request_id,
-                        pno,
-                    )
-                    src = _phase1_fallback_single_pages(
-                        api_key,
-                        png_pages,
-                        [i],
-                        total_pages,
-                        language,
-                        run_classify=run_classify,
-                    )
-                pt, body = src[pno]
-                classifications[i] = pt
-                page_blocks[i] = f"=== PAGE {pno} ===\n{body}"
-                log.info(
-                    "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
-                    request_id,
-                    pno,
-                    total_pages,
-                    pt,
-                    len(body),
-                )
+    # --- Stage 1a: classify each page (parallel) ---
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        cls_futures = [pool.submit(_classify_job, i) for i in range(total_pages)]
+        for fut in as_completed(cls_futures):
+            idx, lbl = fut.result()
+            classifications[idx] = lbl
+
+    # --- Stage 1b: type-aware OCR each page (parallel) ---
+    page_blocks: list[str] = [""] * total_pages
+
+    def _ocr_job(idx: int) -> tuple[int, str]:
+        pno = idx + 1
+        pt = classifications[idx]
+        block = _ocr_single_page(
+            api_key, png_pages[idx], pno, total_pages, language, pt
+        )
+        log.info(
+            "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
+            request_id,
+            pno,
+            total_pages,
+            pt,
+            len(block),
+        )
+        return idx, block
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        ocr_futures = [pool.submit(_ocr_job, i) for i in range(total_pages)]
+        for fut in as_completed(ocr_futures):
+            idx, block = fut.result()
+            page_blocks[idx] = block
 
     # Deduplicate near-identical neighboring pages (uses DUPLICATE vs similarity rules).
     page_blocks = _deduplicate_page_texts(page_blocks, classifications, request_id)
-
-    # Focused re-OCR only for live pages (skip similarity/DUPLICATE-collapsed sheets).
-    if _env_bool("SMART_OCR_PHASE1_REOCR_FOCUS", True):
-        _phase1_reocr_focused_page_types(
-            api_key,
-            png_pages,
-            classifications,
-            page_blocks,
-            total_pages,
-            language,
-            request_id,
-        )
 
     log.info(
         "smart_ocr[%s] after ocr+dedup total_chars=%s",
@@ -1401,7 +945,6 @@ def smart_ocr_extract_student_answers(
         language,
         total_pages,
         expected_questions=expected_questions,
-        request_id=request_id,
     )
 
     log.info(

@@ -33,9 +33,8 @@ from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
-    graded_items_for_combined_review,
     merge_evaluations_into_items,
-    smart_ocr_auto_combined_review_enabled,
+    student_items_for_grading,
 )
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
@@ -1036,16 +1035,12 @@ async def post_analyse_smart_ocr(
     """Extracts question-wise answers and marking coordinates from a PDF.
 
     If modelId is provided, also runs Stage 3 grading against the stored answer
-    model and merges marks, status, feedback fields (including ``feedback_detail``,
-    ``priority_improvement``, ``dimension_notes``, ``example_suggestion``), and
-    annotations into each object in ``items`` (same ``question_id``).
+    model and merges marks, status, feedback, and annotations into each object
+    in ``items`` (same ``question_id``). Intro/cover pages are segregated in the
+    structure (phase 2) pass, not via extra API parameters.
 
-    When ``SMART_OCR_AUTO_COMBINED_REVIEW`` is enabled, also attaches ``combinedReview``
-    (``final_review``, ``overall_improvements``, ``one_thing_to_write``) after grading.
-
-    Intro/cover pages are segregated in the structure (phase 2) pass, not via extra
-    API parameters. Response includes ``skippedPages``: 1-based page indexes not
-    covered by any structured question row (typically intro/cover sheets).
+    Response includes ``skippedPages``: 1-based page indexes not covered by any
+    structured question row (typically intro/cover sheets).
     """
     user, auth_err = _require_auth_user(request)
     if auth_err:
@@ -1146,8 +1141,6 @@ async def post_analyse_smart_ocr(
         len(items),
     )
 
-    combined_review: dict | None = None
-
     # --- Stage 3: grading (only when modelId provided) ---
     if answer_model:
         try:
@@ -1156,31 +1149,16 @@ async def post_analyse_smart_ocr(
             teacher_instructions = format_answer_model_as_teacher_instructions(
                 questions, title
             )
+            items_to_grade = student_items_for_grading(items)
             ev_list = await asyncio.to_thread(
                 evaluate_student_answers_against_model,
                 api_key,
                 title,
                 teacher_instructions,
-                items,
+                items_to_grade,
                 request_id=rid,
             )
             items = merge_evaluations_into_items(items, ev_list)
-            if smart_ocr_auto_combined_review_enabled():
-                qr_payload = graded_items_for_combined_review(items)
-                if qr_payload:
-                    try:
-                        gclient = genai.Client(api_key=api_key)
-                        combined_review = await asyncio.to_thread(
-                            generate_combined_review,
-                            gclient,
-                            qr_payload,
-                        )
-                    except Exception as cr_err:
-                        log.warning(
-                            "analyse/smart-ocr combined review failed request_id=%s: %s",
-                            rid,
-                            cr_err,
-                        )
             log.info(
                 "analyse/smart-ocr eval ok request_id=%s model_id=%s merged_items=%s",
                 rid,
@@ -1207,8 +1185,6 @@ async def post_analyse_smart_ocr(
     extra: dict = {}
     if mid:
         extra["modelId"] = mid
-    if combined_review is not None:
-        extra["combinedReview"] = combined_review
     skipped_pages = _smart_ocr_skipped_pages(page_count, items)
 
     return JSONResponse(
