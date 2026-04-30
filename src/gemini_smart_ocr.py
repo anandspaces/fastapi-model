@@ -435,6 +435,10 @@ def _normalize_flat_item(
         qid = None
 
     ans = str(item.get("student_answer", "")).strip()
+    start_sy = _clamp_pct(item.get("start_y_position_percent", 0))
+    end_sy = _clamp_pct(item.get("end_y_position_percent", 100))
+    my = _clamp_pct(item.get("marking_y_position_percent", 50))
+
     return {
         "question_id": qid,
         "question": question_text,
@@ -443,12 +447,12 @@ def _normalize_flat_item(
         "section_name": section_name.strip(),
         "answer_type": _normalize_answer_type(item.get("answer_type")),
         "start_page": start_page,
-        "start_y_position_percent": _clamp_pct(item.get("start_y_position_percent", 0)),
+        "start_y_position_percent": start_sy,
         "end_page": end_page,
-        "end_y_position_percent": _clamp_pct(item.get("end_y_position_percent", 100)),
+        "end_y_position_percent": end_sy,
         "marking_page": marking_page,
         "marking_x_position_percent": _clamp_pct(item.get("marking_x_position_percent", 50)),
-        "marking_y_position_percent": _clamp_pct(item.get("marking_y_position_percent", 50)),
+        "marking_y_position_percent": my,
     }
 
 
@@ -693,13 +697,21 @@ TASK:
      If no number is visible in the stem, guess from context; the server may assign a gap id when still unknown.
      NEVER invent a row for a booklet question that never appears in the OCR (if Q7 is absent everywhere, omit question_id 7 entirely).
    - question: full question text including any sub-part labels
-   - student_answer: complete answer text, joining sub-part answers with \\n\\n
+   - student_answer: complete answer text, joining sub-part answers with \\n\\n — candidate handwriting only (do NOT paste the printed stem here; that belongs solely in ``question``).
    - answer_type: correction | paragraph | word_list
-   - start_page, start_y_position_percent: where the question label appears
-   - end_page, end_y_position_percent: where the answer ends
-   - marking_page, marking_x_position_percent, marking_y_position_percent (0–100, page numbers 1..{total_pages})
+   - start_page, start_y_position_percent (0–100 from page TOP): top of visible question header/label block.
+   - end_page, end_y_position_percent: bottom edge of handwritten answer ink for this question (not blank margin).
+   - marking_page, marking_x_position_percent, marking_y_position_percent: anchor for examiner remark overlay on ONE page.
 
-5. BLANK / UNATTEMPTED ANSWERS — CRITICAL:
+5. MARKING COORDINATE QUALITY (MUST ADAPT PER COPY; NO FIXED FORMULA):
+   - Infer the handwritten answer zone visually from this specific copy/page, then place marking_y inside that zone.
+   - Do NOT use any fixed global offset from top/bottom; derive placement from visible layout for each question.
+   - Keep marking away from printed question text, headings, instructions, and footer rules; place it near student's ink.
+   - For long answers spanning pages, choose marking_page where the answer body is clearest and densest.
+   - For sparse/short answers, place marking near the actual written line/phrase, not on empty printed area.
+   - If unsure between two positions, choose the one deeper in handwritten content (still readable and margin-safe).
+
+6. BLANK / UNATTEMPTED ANSWERS — CRITICAL:
    - If there is no handwritten answer (blank area, only the question printed, "Ans:-" with nothing after):
      set student_answer to exactly "" (empty string). Do NOT invent or paraphrase filler text.
      Do NOT put teacher feedback, scores, or commentary inside student_answer — that field is OCR content only.

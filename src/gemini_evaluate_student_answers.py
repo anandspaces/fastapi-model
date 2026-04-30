@@ -116,6 +116,7 @@ OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST ou
 
 IMPORTANT — COORDINATES:
 - If the student's OCR JSON contains a row for that ``question_id`` (even with empty ``student_answer``), copy that row's page bounds and marking positions into your output, and add annotations only across those pages.
+- Honour the layout intent encoded in marking coordinates from OCR: annotations and examiner marks belong in the handwritten answer zone — vertically below printed stem/handwriting divider and above page-foot rules; spread ``marking_y`` and annotation ``y_position_percent`` to avoid stacking on identical Y as the student's first printed line label.
 - If the student's OCR JSON has **no row at all** for that ``question_id`` (question not written on the copy), set ``start_page``, ``end_page``, ``marking_page``, all ``*_position_percent`` fields, and ``marking_*_position_percent`` to JSON ``null``, and set ``annotations`` to ``[]``. Do **not** guess page 1 or other placeholders.
 
 The "annotations" array: when the student did write an answer, include 1-3 spots per page spanned; ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for the comment.
