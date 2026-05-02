@@ -56,18 +56,6 @@ def format_answer_model_as_teacher_instructions(
 # ---------------------------------------------------------------------------
 
 
-def _grading_hint_fields(student_answer: str) -> dict[str, Any]:
-    """Derived hints for the evaluator only (not authoritative layout)."""
-    s = student_answer or ""
-    parts = [p for p in s.split("\n\n") if str(p).strip()]
-    lines = s.splitlines()
-    return {
-        "_grading_hint_paragraph_count": len(parts) if parts else (1 if s.strip() else 0),
-        "_grading_hint_line_count": len(lines),
-        "_grading_hint_char_count": len(s),
-    }
-
-
 def _build_evaluation_prompt(
     subject: str,
     teacher_instructions: str,
@@ -77,7 +65,7 @@ def _build_evaluation_prompt(
 
 You are given:
 1. TEACHER INSTRUCTIONS / MODEL KEY — the correct questions, answers, marks, or marking rules provided by the teacher.
-2. A STUDENT's OCR-extracted answers (student_answer) from their handwritten copy. Each row may include ``_grading_hint_*`` fields (paragraph/line/char counts) — use them only to scale annotation density, not as marks evidence.
+2. A STUDENT's OCR-extracted answers (student_answer) from their handwritten copy.
    Rows with completely blank answers may be omitted from this JSON — you must still emit "unattempted" with 0 marks for every TEACHER question. Do not invent OCR text in ``student_answer_summary``.
 
 Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answers. Find each question's matching student answer and award marks. Match the student's answer to the specific model key question by content or question number, even if the student answered them out of order (e.g. if the student answered Q5 first, match it to Q5 in the model key). If a question is present in the TEACHER INSTRUCTIONS but missing from the student's answers, it MUST be included in the output with a status of "unattempted" and 0 marks.
@@ -134,31 +122,28 @@ OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST ou
 
 IMPORTANT — COORDINATES:
 - If the student's OCR JSON contains a row for that ``question_id`` (even with empty ``student_answer``), copy that row's page bounds and marking positions into your output, and add annotations only across those pages.
-- **Drawable vertical band per page:** Treat ``start_y_position_percent`` / ``end_y_position_percent`` with ``start_page`` / ``end_page`` as the handwritten answer band. On the **first** page of the answer use Y from ``start_y_position_percent`` down to the bottom of the page (100%). On the **last** page use Y from the top (0%) to ``end_y_position_percent``. On **middle** pages (if any) use the full page (0%–100%). Place annotation centres in **whitespace between paragraph bands** — infer paragraph breaks from ``student_answer`` (``\\n\\n``): aim callout Y in the **gaps** between blocks, not centred on dense ink lines when a blank band exists between paragraphs.
-- Honour the layout intent from OCR: annotations and examiner marks stay in the handwritten answer zone — below printed stem / divider and above page-foot rules; spread ``marking_y`` and annotation ``y_position_percent`` so callouts do not stack on the same Y as the first printed line label.
+- Honour the layout intent encoded in marking coordinates from OCR: annotations and examiner marks belong in the handwritten answer zone — vertically below printed stem/handwriting divider and above page-foot rules; spread ``marking_y`` and annotation ``y_position_percent`` to avoid stacking on identical Y as the student's first printed line label.
 - If the student's OCR JSON has **no row at all** for that ``question_id`` (question not written on the copy), set ``start_page``, ``end_page``, ``marking_page``, all ``*_position_percent`` fields, and ``marking_*_position_percent`` to JSON ``null``, and set ``annotations`` to ``[]``. Do **not** guess page 1 or other placeholders.
 
-The "annotations" array — **dense examiner marginalia** (specific remarks **on** the student's content; preferred over cramming detail only into ``feedback``). Diagnostic, non-repetitive — like a seasoned mains evaluator filling margins.
+The "annotations" array — place **specific** examiner remarks **on** the student's content (preferred over cramming detail only into ``feedback``):
 
-**Minimum annotation counts (scale up using ``_grading_hint_paragraph_count`` / line length):**
-- **Substantive long answers** (roughly more than ~6–8 lines or multiple paragraphs / multi-page): emit **at least 8** annotations total when the script spans multiple dense pages or ``_grading_hint_paragraph_count`` ≥ 4; otherwise **at least 6**. For very long mains-style answers (many paragraphs or high line count), aim **10–14+** total across pages — **at least one substantive annotation per paragraph block** when ``student_answer`` has multiple ``\\n\\n`` blocks (each block addressed somewhere on the relevant page band).
-- You **must still cover three structural zones** when they exist — label implicitly in wording only:
-  1) **Opening / introduction** — framing, definitions, roadmap, relevance to the question.
-  2) **Body / core evidence** — arguments, examples, logic, omissions vs marking scheme (several spots for long answers).
-  3) **Conclusion / synthesis** — closure quality and link back to the stem; if missing, annotate in the appropriate band what is lacking.
-- If intro or conclusion zones are missing from the handwriting, add an annotation in the nearest appropriate vertical band on the first/last answered page.
+When the student wrote a substantive answer (more than ~6–8 lines or multiple paragraphs across pages):
+- Emit **at least 4 annotations** total across all spanned pages (more when the answer is long or richly structured).
+- You **must cover three structural zones when each exists in the handwriting** — label each implicitly in wording, not brackets:
+  1) **Opening / introduction** — framing, definitions, roadmap, relevance to the question quality (positive or corrective).
+  2) **Body / core evidence** — main arguments, examples, logic, omissions vs marking scheme (one or two spots).
+  3) **Conclusion / synthesis** — how they closed: summary worthiness, link back to stem, takeaway; if they stop abruptly without closure, ``is_positive``: false and suggest briefly what a closing line could do.
+- If the introduction or conclusion zones are visibly missing from the handwritten answer, add an annotation in the nearest appropriate band (often lower on first / last answered page) saying what is lacking.
 
-For **short** answers (about 3 lines or less): emit **at least 3 annotations** anchored to concrete phrases (not generic filler).
+For **short** answers (about 3 lines or less): emit **at least 2 annotations** anchored to concrete phrases.
 
-**Per-page density:** On each page with **dense** handwriting in the drawable band, aim **4–7** annotations where vertical space allows; thinner pages fewer. **Every page with substantial ink** should carry multiple remarks — not only the first or last page.
+Across pages: distribute so the **first page with significant ink** tends to carry intro-related critique and the **last page with substantive writing** tends to carry conclusion-related critique unless structure clearly contradicts.
 
-Across pages: the **first page with significant ink** tends toward intro-related critique; the **last page with substantive writing** toward conclusion-related critique unless structure contradicts.
+Per page density: roughly **2–4** annotations on a page that carries dense handwriting; thinner pages proportionally fewer. Never exceed what vertical spacing allows below.
 
-Technical: ``page_index`` must lie between ``start_page`` and ``end_page`` (same 1-based convention as those fields). Use the student's language (English or Hindi) for every ``comment`` — formal, succinct, mains-appropriate.
+Technical: ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for every ``comment`` — formal, succinct, mains-appropriate wording.
 - For genuinely strong, non-generic merits only, set "is_positive": true (sparse use).
-- For sharpening, omission, misconception, shallow example, weak conclusion — set "is_positive": false and one actionable line.
-
-**Horizontal stagger:** When multiple annotations fall on the **same** ``page_index``, alternate **left vs right** margin bands using ``x_start_percent`` / ``x_end_percent`` (e.g. left cluster ~5–40%, right cluster ~60–95%) so more remarks fit without overlap.
+- For sharpening, omission, misconception, shallow example, weak conclusion, missing stakeholder/dimension — set "is_positive": false and give one actionable examiner line (not moralising fluff).
 
 CRITICAL JSON FORMATTING RULES:
 - You must ONLY output a valid JSON array.
@@ -166,7 +151,7 @@ CRITICAL JSON FORMATTING RULES:
 - DO NOT use literal newlines inside string values (use \\n).
 - Make sure every object and array is properly closed.
 
-CRITICAL PLACEMENT RULE: On the same ``page_index``, keep ``y_position_percent`` at least **12%** apart from each other **unless** you stagger horizontally (left vs right bands as above); if staggered, **8%** minimum vertical gap is acceptable. Stay at least **8%** away from ``marking_y_position_percent`` on that page when ``marking_page`` equals that ``page_index``. This prevents UI overlap while allowing dense examiner-style coverage.
+CRITICAL PLACEMENT RULE: When placing annotations, ensure their "y_position_percent" values are well separated (at least 15% apart) from each other AND from the final "marking_y_position_percent" on the same page. This prevents text overlap in the UI.
 Status must be one of: "correct", "partial", "wrong", "unattempted".
 """
 
@@ -349,135 +334,6 @@ def merge_evaluations_into_items(
     return merged
 
 
-def _clamp_pct_val(x: Any, lo: float = 0.0, hi: float = 100.0) -> float:
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        v = 0.0
-    return max(lo, min(hi, v))
-
-
-def _vertical_band_for_page(
-    page: int,
-    start_page: int,
-    end_page: int,
-    start_y: float,
-    end_y: float,
-) -> tuple[float, float]:
-    """Drawable vertical band (y low→high percent from page top) for one 1-based page index."""
-    if page < start_page or page > end_page:
-        return (0.0, 100.0)
-    sy = _clamp_pct_val(start_y)
-    ey = _clamp_pct_val(end_y)
-    if start_page == end_page:
-        lo, hi = (sy, ey) if sy <= ey else (ey, sy)
-        if hi - lo < 5.0:
-            hi = min(100.0, lo + 10.0)
-        return (lo, hi)
-    if page == start_page:
-        return (sy, 100.0)
-    if page == end_page:
-        return (0.0, ey)
-    return (0.0, 100.0)
-
-
-def _nudge_y_away_from_marking(
-    y: float,
-    marking_y: float,
-    lo: float,
-    hi: float,
-    clearance: float = 10.0,
-) -> float:
-    if abs(y - marking_y) >= clearance:
-        return y
-    above = marking_y + clearance
-    below = marking_y - clearance
-    candidates = []
-    if lo <= below <= hi:
-        candidates.append(below)
-    if lo <= above <= hi:
-        candidates.append(above)
-    if not candidates:
-        return _clamp_pct_val((lo + hi) / 2.0)
-    return min(candidates, key=lambda c: abs(c - y))
-
-
-def normalize_evaluation_annotations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Spread annotation Y (and stagger X) within OCR vertical bands; preserves comment order per page."""
-    out: list[dict[str, Any]] = []
-    for item in items:
-        row = dict(item)
-        anns = row.get("annotations")
-        if not isinstance(anns, list) or not anns:
-            out.append(row)
-            continue
-        sp, ep = row.get("start_page"), row.get("end_page")
-        if sp is None or ep is None:
-            out.append(row)
-            continue
-        try:
-            start_page = int(sp)
-            end_page = int(ep)
-        except (TypeError, ValueError):
-            out.append(row)
-            continue
-
-        sy = _clamp_pct_val(row.get("start_y_position_percent"))
-        ey = _clamp_pct_val(row.get("end_y_position_percent"), 0.0, 100.0)
-        try:
-            marking_page = int(row.get("marking_page") or start_page)
-        except (TypeError, ValueError):
-            marking_page = start_page
-        marking_y = _clamp_pct_val(row.get("marking_y_position_percent"))
-
-        new_anns: list[dict[str, Any]] = []
-        for a in anns:
-            new_anns.append(dict(a) if isinstance(a, dict) else {})
-
-        by_page: dict[int, list[int]] = {}
-        for idx, a in enumerate(new_anns):
-            if not isinstance(a, dict):
-                continue
-            try:
-                pi = int(a.get("page_index", start_page))
-            except (TypeError, ValueError):
-                pi = start_page
-            pi = max(start_page, min(end_page, pi))
-            by_page.setdefault(pi, []).append(idx)
-
-        for page, indices in by_page.items():
-            lo, hi = _vertical_band_for_page(page, start_page, end_page, sy, ey)
-            pad = 3.0
-            lo = _clamp_pct_val(lo + pad)
-            hi = _clamp_pct_val(hi - pad)
-            if hi - lo < 15.0:
-                lo, hi = _vertical_band_for_page(page, start_page, end_page, sy, ey)
-
-            ordered = sorted(
-                indices,
-                key=lambda i: _clamp_pct_val(new_anns[i].get("y_position_percent")),
-            )
-            n = len(ordered)
-            for slot, ann_idx in enumerate(ordered):
-                if n <= 0:
-                    break
-                y_new = lo + (slot + 1) * (hi - lo) / (n + 1)
-                if marking_page == page:
-                    y_new = _nudge_y_away_from_marking(y_new, marking_y, lo, hi)
-                new_anns[ann_idx]["y_position_percent"] = round(_clamp_pct_val(y_new), 2)
-                # Left/right stagger for same-page density
-                if slot % 2 == 0:
-                    new_anns[ann_idx]["x_start_percent"] = 5.0
-                    new_anns[ann_idx]["x_end_percent"] = 42.0
-                else:
-                    new_anns[ann_idx]["x_start_percent"] = 58.0
-                    new_anns[ann_idx]["x_end_percent"] = 95.0
-
-        row["annotations"] = new_anns
-        out.append(row)
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -496,19 +352,13 @@ def evaluate_student_answers_against_model(
     Returns a list of evaluation dicts (one per teacher question).
     Raises ValueError if all attempts fail and regex fallback is also empty.
     """
-    payload: list[dict[str, Any]] = []
-    for it in student_items:
-        row = dict(it)
-        sa = str(row.get("student_answer") or "")
-        row.update(_grading_hint_fields(sa))
-        payload.append(row)
-    student_json = json.dumps(payload, ensure_ascii=False)
+    student_json = json.dumps(student_items, ensure_ascii=False)
     prompt = _build_evaluation_prompt(subject, teacher_instructions, student_json)
 
     client = genai.Client(api_key=api_key)
     cfg = types.GenerateContentConfig(
         temperature=0.1,
-        max_output_tokens=16384,
+        max_output_tokens=8192,
         response_mime_type="application/json",
     )
 
@@ -536,16 +386,11 @@ def evaluate_student_answers_against_model(
             return result
         except Exception as e:
             last_err = e
-            err_s = str(e).lower()
-            extra = ""
-            if "json" in err_s or "parse" in err_s or "unterminated" in err_s:
-                extra = " (JSON parse failure may indicate output truncation — check max_output_tokens)"
             log.warning(
-                "evaluate[%s] attempt=%s failed: %s%s",
+                "evaluate[%s] attempt=%s failed: %s",
                 request_id,
                 attempt,
                 e,
-                extra,
             )
             if attempt < 3:
                 time.sleep(attempt)

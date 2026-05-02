@@ -34,7 +34,6 @@ from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
     merge_evaluations_into_items,
-    normalize_evaluation_annotations,
     student_items_for_grading,
 )
 from src.gemini_expand_model_answer import expand_model_answer
@@ -1160,7 +1159,6 @@ async def post_analyse_smart_ocr(
                 request_id=rid,
             )
             items = merge_evaluations_into_items(items, ev_list)
-            items = normalize_evaluation_annotations(items)
             log.info(
                 "analyse/smart-ocr eval ok request_id=%s model_id=%s merged_items=%s",
                 rid,
