@@ -38,6 +38,10 @@ from src.gemini_evaluate_student_answers import (
 )
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
+from src.free_space_service import (
+    analyze_pdf_free_space,
+    page_zones_to_api_response,
+)
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
 from src.service import (
@@ -1280,3 +1284,89 @@ async def post_analyse_intro_page(
         log.exception("analyse/intro-page failed")
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
     return JSONResponse(_ok("Intro page analysed.", **result))
+
+
+@app.post("/analyse/free-space")
+async def post_analyse_free_space(
+    request: Request,
+    file: UploadFile = File(...),
+    rows: int = Form(20),
+    cols: int = Form(8),
+    min_score: float = Form(0.65),
+) -> JSONResponse:
+    """Detect annotatable free zones on each page of a student copy PDF.
+
+    Returns per-page lists of rectangular regions (percent coordinates) that are
+    empty enough to safely place examiner remarks without overlapping handwriting.
+
+    - rows/cols: grid resolution (higher = finer, slower). Default 20×8.
+    - min_score: emptiness threshold 0–1. Default 0.65 suits exam booklets.
+    """
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+
+    if not _is_pdf(file.filename, file.content_type):
+        return JSONResponse(_err("file must be a PDF."))
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(_err("file is empty."))
+    if not raw.startswith(b"%PDF"):
+        return JSONResponse(_err("file does not look like a valid PDF."))
+
+    max_bytes = copy_ocr_max_bytes()
+    if len(raw) > max_bytes:
+        return JSONResponse(
+            _err(
+                f"PDF exceeds maximum size ({max_bytes} bytes). "
+                "Reduce the file or raise COPY_OCR_MAX_BYTES."
+            )
+        )
+
+    rows = max(4, min(rows, 40))
+    cols = max(4, min(cols, 20))
+    min_score = max(0.0, min(min_score, 1.0))
+
+    rid = str(uuid.uuid4())
+    log.info(
+        "analyse/free-space start request_id=%s user_id=%s filename=%r bytes=%d rows=%d cols=%d min_score=%.2f",
+        rid,
+        user.get("id"),
+        file.filename,
+        len(raw),
+        rows,
+        cols,
+        min_score,
+    )
+
+    try:
+        page_zones = await asyncio.to_thread(
+            analyze_pdf_free_space,
+            raw,
+            rows=rows,
+            cols=cols,
+            min_score=min_score,
+        )
+    except Exception as e:
+        log.exception("analyse/free-space failed request_id=%s", rid)
+        return JSONResponse(_err(f"Free-space analysis error: {e}"), status_code=500)
+
+    pages_data = page_zones_to_api_response(page_zones)
+    total_zones = sum(len(p["freeZones"]) for p in pages_data)
+    log.info(
+        "analyse/free-space ok request_id=%s page_count=%d total_zones=%d",
+        rid,
+        len(pages_data),
+        total_zones,
+    )
+    return JSONResponse(
+        _ok(
+            "Free space analysis complete.",
+            pageCount=len(pages_data),
+            gridRows=rows,
+            gridCols=cols,
+            minScore=min_score,
+            pages=pages_data,
+        )
+    )
