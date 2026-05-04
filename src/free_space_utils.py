@@ -211,15 +211,9 @@ def snap_annotations_to_free_zones(
     *,
     max_shift_pct: float = 30.0,
 ) -> list[dict[str, Any]]:
-    """Adjust each annotation's y/x coordinates to the nearest free zone.
+    """Naive nearest-zone snap — preserved for backward compatibility.
 
-    Args:
-        annotations:      LLM-generated annotation dicts with page_index,
-                          y_position_percent, x_start_percent, x_end_percent.
-        page_free_zones:  Per-page list of FreeZone objects (0-indexed).
-        max_shift_pct:    Max y-distance (%) to accept a snap; keep original if exceeded.
-
-    Returns a new list; original dicts are not mutated.
+    Prefer assign_annotations_to_free_zones for new code.
     """
     result: list[dict[str, Any]] = []
     for ann in annotations:
@@ -242,4 +236,130 @@ def snap_annotations_to_free_zones(
             out["_snapped"] = False
 
         result.append(out)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Capacity-aware annotation assignment
+# ---------------------------------------------------------------------------
+
+
+def _semantic_bucket(y_pct: float) -> str:
+    """Classify a Y percent into top / mid / bottom third of a page."""
+    if y_pct < 33.0:
+        return "top"
+    if y_pct > 67.0:
+        return "bottom"
+    return "mid"
+
+
+def assign_annotations_to_free_zones(
+    annotations: list[dict[str, Any]],
+    page_free_zones: list[list[FreeZone]],
+    *,
+    min_gap_pct: float = 12.0,
+    max_per_zone: int = 2,
+    max_shift_pct: float = 35.0,
+) -> list[dict[str, Any]]:
+    """Assign annotations to free zones with capacity tracking and gap enforcement.
+
+    Improvements over snap_annotations_to_free_zones:
+    - Tracks per-zone usage so at most max_per_zone annotations share one zone.
+    - Enforces min_gap_pct vertical separation between placed annotations per page.
+    - Cascades to the next available zone when the best match is exhausted.
+    - Scores candidates with a semantic bucket hint (top/mid/bottom) so the LLM's
+      intro / body / conclusion placement intent is preserved where possible.
+
+    Returns a new list; originals are not mutated.
+    """
+    if not annotations:
+        return []
+
+    # Build per-page index preserving original list order for output reconstruction.
+    by_page: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    for i, ann in enumerate(annotations):
+        pid = int(ann.get("page_index", 0))
+        by_page.setdefault(pid, []).append((i, ann))
+
+    result: list[dict[str, Any]] = [dict(a) for a in annotations]
+
+    for page_idx, indexed_anns in by_page.items():
+        if page_idx >= len(page_free_zones):
+            for orig_i, _ in indexed_anns:
+                result[orig_i]["_snapped"] = False
+            continue
+
+        zones = sorted(page_free_zones[page_idx], key=lambda z: z.y_start_percent)
+        if not zones:
+            for orig_i, _ in indexed_anns:
+                result[orig_i]["_snapped"] = False
+            continue
+
+        zone_usage = [0] * len(zones)
+        placed_ys: list[float] = []
+
+        # Process top-to-bottom so earlier annotations claim upper zones first.
+        sorted_anns = sorted(
+            indexed_anns,
+            key=lambda t: float(t[1].get("y_position_percent", 50.0)),
+        )
+
+        for orig_i, ann in sorted_anns:
+            desired_y = float(ann.get("y_position_percent", 50.0))
+            desired_bucket = _semantic_bucket(desired_y)
+
+            best_zi: int | None = None
+            best_score = float("-inf")
+
+            for zi, zone in enumerate(zones):
+                if zone_usage[zi] >= max_per_zone:
+                    continue
+                placed_y = zone.y_center()
+                if abs(placed_y - desired_y) > max_shift_pct:
+                    continue
+                if any(abs(placed_y - p) < min_gap_pct for p in placed_ys):
+                    continue
+                bucket_bonus = 15.0 if _semantic_bucket(placed_y) == desired_bucket else 0.0
+                proximity = max_shift_pct - abs(placed_y - desired_y)
+                score = bucket_bonus + proximity + zone.score * 5.0
+                if score > best_score:
+                    best_score = score
+                    best_zi = zi
+
+            if best_zi is None:
+                # Cascade 1: first zone below last-placed Y that satisfies gap + capacity.
+                min_y = (max(placed_ys) + min_gap_pct) if placed_ys else 0.0
+                for zi, zone in enumerate(zones):
+                    if zone_usage[zi] >= max_per_zone:
+                        continue
+                    placed_y = zone.y_center()
+                    if placed_y >= min_y and all(
+                        abs(placed_y - p) >= min_gap_pct for p in placed_ys
+                    ):
+                        best_zi = zi
+                        break
+
+            if best_zi is None:
+                # Cascade 2: any zone with remaining capacity that still respects gap.
+                for zi, zone in enumerate(zones):
+                    if zone_usage[zi] < max_per_zone:
+                        placed_y = zone.y_center()
+                        if all(abs(placed_y - p) >= min_gap_pct for p in placed_ys):
+                            best_zi = zi
+                            break
+
+            if best_zi is not None:
+                zone = zones[best_zi]
+                zone_usage[best_zi] += 1
+                placed_y = zone.y_center()
+                placed_ys.append(placed_y)
+                out = result[orig_i]
+                out["y_position_percent"] = round(placed_y, 2)
+                out["x_start_percent"] = zone.x_start_percent
+                out["x_end_percent"] = zone.x_end_percent
+                out["_snapped"] = True
+                out["_snap_score"] = round(zone.score, 4)
+            else:
+                result[orig_i]["_snapped"] = False
+
     return result

@@ -40,7 +40,9 @@ from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.free_space_service import (
     analyze_pdf_free_space,
+    api_response_to_page_zones,
     page_zones_to_api_response,
+    snap_items_annotations,
 )
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
 from src.database import UPLOADS_DIR, init_db
@@ -80,6 +82,11 @@ class ModelKeyPayload(BaseModel):
     title: str
     lang: str
     booklet_type: str | None = None
+
+
+class SnapAnnotationsRequest(BaseModel):
+    items: list[dict]
+    pages: list[dict]
 
 
 load_dotenv()
@@ -1035,6 +1042,7 @@ async def post_analyse_smart_ocr(
     file: UploadFile = File(...),
     language: str = Form("en"),
     model_id: str = Form("", alias="modelId"),
+    snap_annotations: bool = Form(True, alias="snapAnnotations"),
 ) -> JSONResponse:
     """Extracts question-wise answers and marking coordinates from a PDF.
 
@@ -1169,6 +1177,30 @@ async def post_analyse_smart_ocr(
                 mid,
                 len(items),
             )
+            if snap_annotations:
+                try:
+                    page_zones = await asyncio.to_thread(
+                        analyze_pdf_free_space,
+                        raw,
+                    )
+                    items = snap_items_annotations(items, page_zones)
+                    snapped = sum(
+                        1
+                        for it in items
+                        for ann in (it.get("annotations") or [])
+                        if ann.get("_snapped")
+                    )
+                    log.info(
+                        "analyse/smart-ocr snap ok request_id=%s snapped_annotations=%s",
+                        rid,
+                        snapped,
+                    )
+                except Exception as snap_err:
+                    log.warning(
+                        "analyse/smart-ocr snap failed request_id=%s: %s",
+                        rid,
+                        snap_err,
+                    )
         except Exception as e:
             log.exception(
                 "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid
@@ -1368,5 +1400,62 @@ async def post_analyse_free_space(
             gridCols=cols,
             minScore=min_score,
             pages=pages_data,
+        )
+    )
+
+
+@app.post("/analyse/snap-annotations")
+async def post_snap_annotations(
+    request: Request,
+    payload: SnapAnnotationsRequest,
+) -> JSONResponse:
+    """Snap smart-ocr annotation coordinates onto actual free zones.
+
+    Accepts the ``items`` array from /analyse/smart-ocr and the ``pages`` array
+    from /analyse/free-space. Returns the same items with annotation y/x coordinates
+    adjusted to land in pixel-verified empty regions, with capacity tracking so no
+    two annotations stack on the same zone.
+
+    Use this when you have cached smart-ocr results and want to re-snap against a
+    fresh or different free-space analysis without re-running OCR.
+    """
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+
+    items = [dict(it) for it in payload.items if isinstance(it, dict)]
+    pages = [dict(p) for p in payload.pages if isinstance(p, dict)]
+
+    if not items:
+        return JSONResponse(_err("items must be a non-empty array."))
+    if not pages:
+        return JSONResponse(_err("pages must be a non-empty array."))
+
+    try:
+        page_zones = api_response_to_page_zones(pages)
+        snapped_items = snap_items_annotations(items, page_zones)
+    except Exception as e:
+        log.exception("analyse/snap-annotations failed")
+        return JSONResponse(_err(f"Snap error: {e}"), status_code=500)
+
+    snapped_count = sum(
+        1
+        for it in snapped_items
+        for ann in (it.get("annotations") or [])
+        if ann.get("_snapped")
+    )
+    total_annotations = sum(len(it.get("annotations") or []) for it in snapped_items)
+    log.info(
+        "analyse/snap-annotations ok item_count=%s snapped=%s/%s",
+        len(snapped_items),
+        snapped_count,
+        total_annotations,
+    )
+    return JSONResponse(
+        _ok(
+            "Annotations snapped.",
+            items=snapped_items,
+            snappedCount=snapped_count,
+            totalAnnotations=total_annotations,
         )
     )

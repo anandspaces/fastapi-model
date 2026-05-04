@@ -14,11 +14,11 @@ import numpy as np
 
 from src.free_space_utils import (
     FreeZone,
+    assign_annotations_to_free_zones,
     find_free_zones,
     get_grid_scores,
     merge_adjacent_zones,
     score_cell,
-    snap_annotations_to_free_zones,
 )
 
 log = logging.getLogger(__name__)
@@ -162,22 +162,25 @@ def snap_items_annotations(
     items: list[dict[str, Any]],
     page_free_zones: list[list[FreeZone]],
     *,
-    max_shift_pct: float = 30.0,
+    min_gap_pct: float = 12.0,
+    max_per_zone: int = 2,
+    max_shift_pct: float = 35.0,
 ) -> list[dict[str, Any]]:
-    """Post-process smart-ocr items: snap each item's annotation coordinates
-    to the nearest free zone on its page.
+    """Post-process smart-ocr items: assign each item's annotations to free zones.
 
-    Items have an 'annotations' list; each annotation has page_index,
-    y_position_percent, x_start_percent, x_end_percent.
+    Uses capacity-aware greedy assignment with minimum gap enforcement and
+    semantic bucket scoring to preserve intro / body / conclusion placement intent.
     """
     updated_items: list[dict[str, Any]] = []
     for item in items:
         out = dict(item)
         anns = out.get("annotations")
         if isinstance(anns, list) and anns:
-            out["annotations"] = snap_annotations_to_free_zones(
+            out["annotations"] = assign_annotations_to_free_zones(
                 anns,
                 page_free_zones,
+                min_gap_pct=min_gap_pct,
+                max_per_zone=max_per_zone,
                 max_shift_pct=max_shift_pct,
             )
         updated_items.append(out)
@@ -200,3 +203,39 @@ def page_zones_to_api_response(
         }
         for page_idx, zones in enumerate(page_zones)
     ]
+
+
+def api_response_to_page_zones(
+    pages: list[dict[str, Any]],
+) -> list[list[FreeZone]]:
+    """Reconstruct list[list[FreeZone]] from a /analyse/free-space pages array.
+
+    Inverse of page_zones_to_api_response — used by the snap-annotations endpoint
+    so callers can pass a cached free-space result without re-uploading the PDF.
+    """
+    if not pages:
+        return []
+    max_idx = max(int(p.get("pageIndex", 0)) for p in pages)
+    result: list[list[FreeZone]] = [[] for _ in range(max_idx + 1)]
+    for page in pages:
+        idx = int(page.get("pageIndex", 0))
+        if not (0 <= idx <= max_idx):
+            continue
+        zones: list[FreeZone] = []
+        for z in page.get("freeZones", []):
+            try:
+                zones.append(
+                    FreeZone(
+                        x_start_percent=float(z["x_start_percent"]),
+                        x_end_percent=float(z["x_end_percent"]),
+                        y_start_percent=float(z["y_start_percent"]),
+                        y_end_percent=float(z["y_end_percent"]),
+                        score=float(z.get("score", 0.0)),
+                        row=0,
+                        col=0,
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
+        result[idx] = zones
+    return result
