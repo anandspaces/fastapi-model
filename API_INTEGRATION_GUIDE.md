@@ -606,9 +606,11 @@ Allow **60–180s** depending on `type` (essay responses are longer to generate)
 
 ## 6) AI Analyse APIs
 
+> Focused HTTP reference (auth, errors, field tables): **`AI_ANALYSE_API_INTEGRATION.md`**.
+
 > Intro-page flow is separate and optional. If full pages are provided for grading, intro flow can be handled independently.
 
-### POST `/api/v1/ai/analyse/full`
+### POST `/analyse/full`
 
 Full handwritten-page grading (Flutter-aligned JSON). Same auth envelope as other routes.
 
@@ -695,7 +697,7 @@ Whole-PDF OCR for a **single-question essay-style student answer** (handwriting 
 
 #### AI / parsing failures (`500`)
 
-Same pattern as `/api/v1/ai/analyse/full`: `status: 0`, `message` prefixed with `AI service error:`.
+Same pattern as `/analyse/full`: `status: 0`, `message` prefixed with `AI service error:`.
 
 #### Client timeouts
 
@@ -746,7 +748,7 @@ Same pattern as `/analyse/copy-ocr` (`status: 0` for validation, `500` + `AI ser
 
 ---
 
-### POST `/api/v1/ai/analyse/cached-ocr`
+### POST `/analyse/cached-ocr`
 
 - Content-Type: `application/json`
 - Auth required: Yes
@@ -768,11 +770,11 @@ Same pattern as `/analyse/copy-ocr` (`status: 0` for validation, `500` + `AI ser
 
 #### Success Response (`200`)
 
-Same shape as **`/api/v1/ai/analyse/full`** (snake_case `data`). `data.student_text` is always the **request’s** `cachedStudentText`.
+Same shape as **`/analyse/full`** (snake_case `data`). `data.student_text` is always the **request’s** `cachedStudentText`.
 
 ---
 
-### POST `/api/v1/ai/analyse/combined-review`
+### POST `/analyse/combined-review`
 
 - Content-Type: `application/json`
 - Auth required: Yes
@@ -821,7 +823,7 @@ Same shape as **`/api/v1/ai/analyse/full`** (snake_case `data`). `data.student_t
 
 ---
 
-### POST `/api/v1/ai/analyse/intro-page`
+### POST `/analyse/intro-page`
 
 - Content-Type: `application/json`
 - Auth required: Yes
@@ -886,11 +888,11 @@ Same shape as **`/api/v1/ai/analyse/full`** (snake_case `data`). `data.student_t
    - manage via `GET/PUT/DELETE /models*` endpoints
    - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `custom_with_model` / `essay` for length — see section 5)
 5. For AI checking workflow:
-   - `POST /api/v1/ai/analyse/full` (JSON base64 page images + grading)
+   - `POST /analyse/full` (JSON base64 page images + grading)
    - optional `POST /analyse/copy-ocr` or `POST /analyse/copy-ocr-rasterization` (essay PDF → plain `text` + `pageCount`, no DB; rasterization = per-page parallel OCR)
-   - optionally `POST /api/v1/ai/analyse/cached-ocr`
-   - `POST /api/v1/ai/analyse/combined-review`
-   - optionally `POST /api/v1/ai/analyse/intro-page` (separate intro-only use case; JSON `pageImageBase64`)
+   - optionally `POST /analyse/cached-ocr`
+   - `POST /analyse/combined-review`
+   - optionally `POST /analyse/intro-page` (separate intro-only use case; JSON `pageImageBase64`)
 
 ### Token Usage
 
@@ -991,7 +993,7 @@ curl -X POST "http://127.0.0.1:8000/analyse/copy-ocr-rasterization" \
 Build `PAGE_B64` with `base64 -w0 page1.jpg` (or your tooling), then:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/ai/analyse/full" \
+curl -X POST "http://127.0.0.1:8000/analyse/full" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d "{\"pageImagesBase64\":[\"$PAGE_B64\"],\"questionTitle\":\"Q3...\",\"modelDescription\":\"Key points...\",\"totalMarks\":8,\"language\":\"en\",\"checkLevel\":\"Moderate\"}"
@@ -1000,7 +1002,7 @@ curl -X POST "http://127.0.0.1:8000/api/v1/ai/analyse/full" \
 ### Analyse intro page (JSON base64)
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/ai/analyse/intro-page" \
+curl -X POST "http://127.0.0.1:8000/analyse/intro-page" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d "{\"pageImageBase64\":\"$PAGE_B64\"}"

@@ -43,7 +43,7 @@ class BulkQuestionPageMarksPayload(BaseModel):
 
 
 class FullAnalysisRequest(BaseModel):
-    """JSON body for ``POST /api/v1/ai/analyse/full`` (Flutter-aligned field names)."""
+    """JSON body for ``POST /analyse/full`` (Flutter-aligned field names)."""
 
     model_config = ConfigDict(populate_by_name=True)
 

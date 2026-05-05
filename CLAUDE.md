@@ -53,7 +53,7 @@ Copy `.env.example` to `.env` and fill in:
 | `gemini_question_answers.py` | Process Q&A pairs from PDFs |
 | `gemini_smart_ocr.py` | Extract student answers from handwritten booklet PDFs |
 | `gemini_copy_ocr.py` | Essay copy extraction — whole-PDF and rasterized parallel |
-| `gemini_analyse.py` | Flutter-aligned AI grading (`POST /api/v1/ai/analyse/*`), combined reviews, intro-page marks |
+| `gemini_analyse.py` | Flutter-aligned AI grading (`POST /analyse/full`, `/analyse/cached-ocr`, `/analyse/combined-review`, `/analyse/intro-page`), combined reviews, intro-page marks |
 | `gemini_evaluate_student_answers.py` | Evaluate student answers against model answers |
 | `free_space_utils.py` | Detect writable zones in PDFs, grid scoring, annotation snapping |
 | `free_space_service.py` | Orchestrate free-space analysis, map to API response |
@@ -85,7 +85,7 @@ All endpoints return:
 { "status": -1, "message": "..." } // auth/permission error
 ```
 
-For **`POST /api/v1/ai/analyse/*`**, keys inside `data` are **snake_case** (for example `student_text`, `marks_awarded`, `overall_review`).
+For **`POST /analyse/full`**, **`/analyse/cached-ocr`**, **`/analyse/combined-review`**, and **`/analyse/intro-page`**, keys inside `data` are **snake_case** (for example `student_text`, `marks_awarded`, `overall_review`). See **`AI_ANALYSE_API_INTEGRATION.md`**.
 
 ### Key AI Flows
 

@@ -8,7 +8,7 @@ Move Gemini calls to backend. Flutter should call backend endpoints and receive 
 
 ## Base URL
 
-`https://<your-domain>/api/v1`
+`https://<your-domain>` — paths below are rooted at the API host (e.g. local `http://127.0.0.1:8000`). Authoritative URLs: **`AI_ANALYSE_API_INTEGRATION.md`**.
 
 All endpoints:
 - `Content-Type: application/json`
@@ -21,10 +21,10 @@ All endpoints:
 
 | Flutter method in `gemini_service.dart` | Backend endpoint |
 |---|---|
-| `analyse(...)` / `analyseInIsolate(...)` | `POST /ai/analyse/full` |
-| `_analyseFromCachedText(...)` / `analyseWithCachedOcr(...)` | `POST /ai/analyse/cached-ocr` |
-| `_doCombinedKeyReview(...)` / `generateCombinedKeyReview(...)` | `POST /ai/analyse/combined-review` |
-| `_doAnalyseIntroPage(...)` / `analyseIntroPageInIsolate(...)` | `POST /ai/analyse/intro-page` |
+| `analyse(...)` / `analyseInIsolate(...)` | `POST /analyse/full` |
+| `_analyseFromCachedText(...)` / `analyseWithCachedOcr(...)` | `POST /analyse/cached-ocr` |
+| `_doCombinedKeyReview(...)` / `generateCombinedKeyReview(...)` | `POST /analyse/combined-review` |
+| `_doAnalyseIntroPage(...)` / `analyseIntroPageInIsolate(...)` | `POST /analyse/intro-page` |
 
 ---
 
@@ -52,7 +52,7 @@ Success payloads under `data` use **snake_case** keys (e.g. `student_text`, `mar
 
 ## 1) Full Analysis (Images)
 
-### `POST /ai/analyse/full`
+### `POST /analyse/full`
 
 ### Request
 
@@ -100,7 +100,7 @@ Fields:
 
 ## 2) Cached OCR Re-analysis
 
-### `POST /ai/analyse/cached-ocr`
+### `POST /analyse/cached-ocr`
 
 ### Request
 
@@ -130,7 +130,7 @@ Same as full analysis response object.
 
 ## 3) Combined Key Review
 
-### `POST /ai/analyse/combined-review`
+### `POST /analyse/combined-review`
 
 ### Request
 
@@ -169,7 +169,7 @@ Same as full analysis response object.
 
 ## 4) Intro Page Marks Extraction
 
-### `POST /ai/analyse/intro-page`
+### `POST /analyse/intro-page`
 
 ### Request
 
