@@ -61,12 +61,39 @@ def format_answer_model_as_teacher_instructions(
 # Prompt
 # ---------------------------------------------------------------------------
 
+_CHECK_LEVEL_ALLOWED = frozenset({"moderate", "hard"})
+
+
+def normalize_evaluation_check_level(raw: str) -> str:
+    """Return canonical ``Moderate`` or ``Hard``, or empty string if invalid (caller rejects)."""
+    s = (raw or "Moderate").strip().lower()
+    if s not in _CHECK_LEVEL_ALLOWED:
+        return ""
+    return "Hard" if s == "hard" else "Moderate"
+
+
+def evaluation_strictness_instruction(check_level: str) -> str:
+    """Same semantics as Flutter ``GeminiService`` Moderate vs Hard grading lines."""
+    if (check_level or "").strip().lower() == "hard":
+        return (
+            "- **EVALUATION STRICTNESS: HARD.** Be extremely strict. All answers must be "
+            "strictly evaluated and normally score less than 50% of the total marks unless "
+            "they are absolutely perfect without any flaws."
+        )
+    return (
+        "- **EVALUATION STRICTNESS: MODERATE.** Grade normally, but keep medium or average "
+        "answers around or below 50% of the total marks."
+    )
+
 
 def _build_evaluation_prompt(
     subject: str,
     teacher_instructions: str,
     student_json: str,
+    *,
+    check_level: str = "Moderate",
 ) -> str:
+    strict_line = evaluation_strictness_instruction(check_level)
     return f"""You are a strict but fair {subject} examiner-mentor (UPSC Civil Services / mains-answer ethos). Your feedback reads like seasoned script evaluation — professional, restrained, clinically useful — never cheerleading.
 
 You are given:
@@ -77,6 +104,7 @@ You are given:
 Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answers. Find each question's matching student answer and award marks. Match the student's answer to the specific model key question by content or question number, even if the student answered them out of order (e.g. if the student answered Q5 first, match it to Q5 in the model key). If a question is present in the TEACHER INSTRUCTIONS but missing from the student's answers, it MUST be included in the output with a status of "unattempted" and 0 marks.
 
 MARKING RULES:
+{strict_line}
 - The `max_marks` in your output MUST exactly match the "MAX MARKS ALLOWED" for each question in the TEACHER INSTRUCTIONS.
 - **Booklet vs instructions:** When a question includes **Instructions (examiner marking key)**, factor that content into gaps, positives, marks, `feedback`, and `annotations` the same way you use the **Model booklet (ideal answer)** — it is part of the model key, not optional commentary.
 - Award `marks_awarded` as a DECIMAL in multiples of 0.5 (0, 0.5, 1, 1.5, ...).
@@ -466,14 +494,19 @@ def evaluate_student_answers_against_model(
     student_items: list[dict[str, Any]],
     *,
     request_id: str,
+    check_level: str = "Moderate",
 ) -> list[dict[str, Any]]:
     """Call Gemini to grade student OCR items against the teacher model key.
+
+    ``check_level`` is ``Moderate`` or ``Hard`` (Dart / Flutter ``checkLevel`` parity).
 
     Returns a list of evaluation dicts (one per teacher question).
     Raises ValueError if all attempts fail and regex fallback is also empty.
     """
     student_json = json.dumps(student_items, ensure_ascii=False)
-    prompt = _build_evaluation_prompt(subject, teacher_instructions, student_json)
+    prompt = _build_evaluation_prompt(
+        subject, teacher_instructions, student_json, check_level=check_level
+    )
 
     client = genai.Client(api_key=api_key)
     cfg = types.GenerateContentConfig(
@@ -498,10 +531,11 @@ def evaluate_student_answers_against_model(
             last_raw = raw
             result = _parse_evaluation_response(raw)
             log.info(
-                "evaluate[%s] attempt=%s ok evaluations=%s",
+                "evaluate[%s] attempt=%s ok evaluations=%s check_level=%s",
                 request_id,
                 attempt,
                 len(result),
+                check_level,
             )
             return result
         except Exception as e:

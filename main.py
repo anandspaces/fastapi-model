@@ -34,6 +34,7 @@ from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
     merge_evaluations_into_items,
+    normalize_evaluation_check_level,
     student_items_for_grading,
 )
 from src.gemini_expand_model_answer import expand_model_answer
@@ -1046,6 +1047,7 @@ async def post_analyse_smart_ocr(
     language: str = Form("en"),
     model_id: str = Form("", alias="modelId"),
     snap_annotations: bool = Form(True, alias="snapAnnotations"),
+    check_level: str = Form("Moderate", alias="checkLevel"),
 ) -> JSONResponse:
     """Extracts question-wise answers and marking coordinates from a PDF.
 
@@ -1054,12 +1056,21 @@ async def post_analyse_smart_ocr(
     in ``items`` (same ``question_id``). Intro/cover pages are segregated in the
     structure (phase 2) pass, not via extra API parameters.
 
+    Optional Form field ``checkLevel`` (``Moderate`` | ``Hard``) controls evaluator
+    strictness when grading with ``modelId`` — matches Flutter ``checkLevel``.
+
     Response includes ``skippedPages``: 1-based page indexes not covered by any
     structured question row (typically intro/cover sheets).
     """
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
+
+    check_canon = normalize_evaluation_check_level(check_level)
+    if not check_canon:
+        return JSONResponse(
+            _err('checkLevel must be "Moderate" or "Hard" (camelCase form field checkLevel).')
+        )
 
     lang = language.strip().lower()
     if not _valid_lang(lang):
@@ -1085,12 +1096,14 @@ async def post_analyse_smart_ocr(
     mid = model_id.strip()
 
     log.info(
-        "analyse/smart-ocr start request_id=%s user_id=%s filename=%r bytes=%s model_id=%r",
+        "analyse/smart-ocr start request_id=%s user_id=%s filename=%r bytes=%s "
+        "model_id=%r check_level=%s",
         rid,
         user.get("id"),
         file.filename,
         len(raw),
         mid or "(none)",
+        check_canon,
     )
 
     # --- Validate model early (before burning OCR tokens) ---
@@ -1172,6 +1185,7 @@ async def post_analyse_smart_ocr(
                 teacher_instructions,
                 items_to_grade,
                 request_id=rid,
+                check_level=check_canon,
             )
             items = merge_evaluations_into_items(items, ev_list)
             log.info(
@@ -1215,13 +1229,14 @@ async def post_analyse_smart_ocr(
                     pageCount=page_count,
                     items=items,
                     modelId=mid,
+                    checkLevel=check_canon,
                     gradingError=str(e),
                     skippedPages=_smart_ocr_skipped_pages(page_count, items),
                 )
             )
 
     # --- Build response ---
-    extra: dict = {}
+    extra: dict = {"checkLevel": check_canon}
     if mid:
         extra["modelId"] = mid
     skipped_pages = _smart_ocr_skipped_pages(page_count, items)
