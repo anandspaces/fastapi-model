@@ -360,12 +360,14 @@ Creates a new question for a model **key** you already registered (`POST /models
   "questionNo": "Q1",
   "title": "New question title",
   "desc": "Full question / model answer text",
+  "instructions": "Optional examiner / scheme notes (value-add, rubric) separate from desc",
   "pageNum": 1,
   "marks": 5,
   "diagramDescriptions": []
 }
 ```
 
+- **`instructions`** is optional; omit it or send `""` when there are no extra marking notes (stored in DB inside `questions_json` with each question).
 - **`diagramDescriptions`** is optional; omit it or send `[]` when there are no diagrams.
 - **`questionNo` in the body is overwritten** after create: every question’s `questionNo` is renumbered to `Q1`, `Q2`, … in array order (same behaviour as after deleting a question).
 - New **`id`**: next available `q-eng-001`, `q-eng-002`, … by scanning existing question ids matching `q-eng-` + three digits.
@@ -403,11 +405,14 @@ Creates a new question for a model **key** you already registered (`POST /models
   "questionNo": "Q1",
   "title": "Updated title",
   "desc": "Updated description",
+  "instructions": "",
   "pageNum": 2,
   "marks": 8,
   "diagramDescriptions": []
 }
 ```
+
+- **`instructions`** follows the same rules as on create (optional; defaults to `""`).
 
 #### Success Response (`200`)
 

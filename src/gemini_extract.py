@@ -23,12 +23,13 @@ Extract every question/answer block into a structured list. For each block outpu
 - "questionNo": string, e.g. "Q1", "Q2".
 - "title": string, the question title or prompt (one line/sentence).
 - "desc": string, the full description or answer text (can be multi-line).
+- "instructions": string, marking guidance / examiner notes / value-add (objectives, scheme rubric, quotations, supplementary context) SEPARATE from the main answer body in desc — use "" if none.
 - "pageNum": integer, 1-based page number where this question appears.
 - "marks": integer, the number of marks for this question. Search thoroughly for patterns like "[8]", "(8 marks)", "8 marks", "8m", or any number near the question indicating marks. Never default to 0 — always look carefully. Use 0 only if the document genuinely has no mark indicators anywhere for that question.
 - "diagramDescriptions": array of strings, any descriptions of diagrams/flowcharts/maps mentioned (empty array if none).
 
-Output ONLY a single JSON array of such objects. No markdown, no explanation. If the document has no clear questions, return one synthetic row with the whole content in "desc", pageNum 1, id "q-eng-001", questionNo "Q1", title "Content", marks 0 (no per-question marks in that case), diagramDescriptions [].
-Valid JSON array example: [{"id":"q-eng-001","questionNo":"Q1","title":"...","desc":"...","pageNum":1,"marks":8,"diagramDescriptions":["..."]}]
+Output ONLY a single JSON array of such objects. No markdown, no explanation. If the document has no clear questions, return one synthetic row with the whole content in "desc", instructions "", pageNum 1, id "q-eng-001", questionNo "Q1", title "Content", marks 0 (no per-question marks in that case), diagramDescriptions [].
+Valid JSON array example: [{"id":"q-eng-001","questionNo":"Q1","title":"...","desc":"...","instructions":"","pageNum":1,"marks":8,"diagramDescriptions":["..."]}]
 """
 
 _EXTRACT_RESPONSE_SCHEMA = types.Schema(
@@ -40,6 +41,10 @@ _EXTRACT_RESPONSE_SCHEMA = types.Schema(
             "questionNo": types.Schema(type=types.Type.STRING),
             "title": types.Schema(type=types.Type.STRING),
             "desc": types.Schema(type=types.Type.STRING),
+            "instructions": types.Schema(
+                type=types.Type.STRING,
+                description="Marking notes / value-add separate from desc; empty string if none.",
+            ),
             "pageNum": types.Schema(type=types.Type.INTEGER),
             "marks": types.Schema(
                 type=types.Type.INTEGER,
@@ -55,6 +60,7 @@ _EXTRACT_RESPONSE_SCHEMA = types.Schema(
             "questionNo",
             "title",
             "desc",
+            "instructions",
             "pageNum",
             "marks",
             "diagramDescriptions",
@@ -64,6 +70,7 @@ _EXTRACT_RESPONSE_SCHEMA = types.Schema(
             "questionNo",
             "title",
             "desc",
+            "instructions",
             "pageNum",
             "marks",
             "diagramDescriptions",
@@ -149,6 +156,7 @@ def normalize(obj: dict) -> dict:
         "questionNo": str(obj.get("questionNo", "Q1")),
         "title": str(obj.get("title", "")),
         "desc": str(obj.get("desc", "")),
+        "instructions": str(obj.get("instructions", "")),
         "pageNum": int(obj.get("pageNum", 1)),
         "marks": marks,
         "diagramDescriptions": (

@@ -28,7 +28,7 @@ def format_answer_model_as_teacher_instructions(
     """Serialize a model's questions list into the prompt block the evaluator reads.
 
     Each question dict shape (from QuestionPayload / SQLite JSON):
-      questionNo, title, desc, pageNum, marks, diagramDescriptions
+      questionNo, title, desc, instructions, pageNum, marks, diagramDescriptions
     """
     lines: list[str] = [f"Subject / Paper: {title or 'General'}", ""]
     for q in questions:
@@ -38,12 +38,18 @@ def format_answer_model_as_teacher_instructions(
             qlabel = f"Q{qlabel}"
         qtitle = (q.get("title") or "").strip()
         desc = (q.get("desc") or "").strip()
+        instructions = (q.get("instructions") or "").strip()
         marks = q.get("marks") or 0
         diagrams = q.get("diagramDescriptions") or []
 
         lines.append(f"{qlabel}. {qtitle}")
         if desc:
-            lines.append(f"   Details: {desc}")
+            lines.append(f"   Model booklet (ideal answer): {desc}")
+        if instructions:
+            lines.append(
+                f"   Instructions (examiner marking key — weigh like the booklet text): "
+                f"{instructions}"
+            )
         if diagrams:
             lines.append(f"   Diagrams/Key points: {'; '.join(str(d) for d in diagrams)}")
         lines.append(f"   MAX MARKS ALLOWED: {marks}")
@@ -64,7 +70,7 @@ def _build_evaluation_prompt(
     return f"""You are a strict but fair {subject} examiner-mentor (UPSC Civil Services / mains-answer ethos). Your feedback reads like seasoned script evaluation — professional, restrained, clinically useful — never cheerleading.
 
 You are given:
-1. TEACHER INSTRUCTIONS / MODEL KEY — the correct questions, answers, marks, or marking rules provided by the teacher.
+1. TEACHER INSTRUCTIONS / MODEL KEY — for each question this includes the **model booklet (ideal answer)** and any parallel **instructions (examiner marking key)**. Both are authoritative: use the booklet as the reference script; use instructions for rubric, dimensions, quotations, scheme nuance the teacher expects enforced.
 2. A STUDENT's OCR-extracted answers (student_answer) from their handwritten copy.
    Rows with completely blank answers may be omitted from this JSON — you must still emit "unattempted" with 0 marks for every TEACHER question. Do not invent OCR text in ``student_answer_summary``.
 
@@ -72,6 +78,7 @@ Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answe
 
 MARKING RULES:
 - The `max_marks` in your output MUST exactly match the "MAX MARKS ALLOWED" for each question in the TEACHER INSTRUCTIONS.
+- **Booklet vs instructions:** When a question includes **Instructions (examiner marking key)**, factor that content into gaps, positives, marks, `feedback`, and `annotations` the same way you use the **Model booklet (ideal answer)** — it is part of the model key, not optional commentary.
 - Award `marks_awarded` as a DECIMAL in multiples of 0.5 (0, 0.5, 1, 1.5, ...).
 - NEVER EXCEED the "MAX MARKS ALLOWED" for a question. If a student's answer is perfect, give exactly the MAX MARKS ALLOWED.
 - CONCEPTUAL FLEXIBILITY: Evaluate with deep human intelligence! Do not blindly string-match; award full marks if the underlying meaning and logic is identical.

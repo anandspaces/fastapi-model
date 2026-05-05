@@ -5,6 +5,7 @@ class QuestionPayload(BaseModel):
     questionNo: str
     title: str
     desc: str
+    instructions: str = ""
     pageNum: int = Field(ge=1)
     marks: int = Field(ge=0)
     diagramDescriptions: list[str] = Field(default_factory=list)

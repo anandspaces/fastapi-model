@@ -559,10 +559,13 @@ async def reorder_model_questions(
 
 def _question_payload_log_dict(payload: QuestionPayload) -> dict[str, object]:
     d = payload.model_dump()
-    desc = str(d.get("desc") or "")
     preview_len = 300
-    prev = desc[:preview_len] + (f"... (+{len(desc) - preview_len} chars)" if len(desc) > preview_len else "")
-    d["desc"] = prev.replace("\r", " ").replace("\n", " ")
+    for key in ("desc", "instructions"):
+        text = str(d.get(key) or "")
+        prev = text[:preview_len] + (
+            f"... (+{len(text) - preview_len} chars)" if len(text) > preview_len else ""
+        )
+        d[key] = prev.replace("\r", " ").replace("\n", " ")
     d["diagramDescriptions_count"] = len(d.get("diagramDescriptions") or [])
     if "diagramDescriptions" in d:
         del d["diagramDescriptions"]
