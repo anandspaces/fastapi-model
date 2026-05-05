@@ -6,6 +6,7 @@ import logging
 import re
 import os
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -966,6 +967,10 @@ async def post_api_v1_analyse_full(
         return auth_err
     if not page_images:
         return JSONResponse(_err("At least one pageImages file is required."), status_code=400)
+    log.info(
+        "[analyse/full] REQUEST user=%s model_id=%s question_id=%s check_level=%s images=%d",
+        user["id"], model_id.strip(), question_id.strip(), check_level, len(page_images),
+    )
     resolved = _resolve_question_grading_context(
         str(user["id"]),
         model_id.strip(),
@@ -983,14 +988,24 @@ async def post_api_v1_analyse_full(
         check_canon,
         _page_count,
     ) = resolved
+    log.info(
+        "[analyse/full] CONTEXT question=%r marks=%d lang=%s check=%s instruction=%s",
+        question_title[:80], total_marks, lang, check_canon, bool(instr_eff),
+    )
     try:
         blobs = await _read_page_image_blobs(page_images)
     except ValueError as e:
         return JSONResponse(_err(str(e)), status_code=400)
+    log.info(
+        "[analyse/full] IMAGES loaded pages=%d total_bytes=%d",
+        len(blobs), sum(len(b) for b in blobs),
+    )
     try:
         api_key = load_api_key()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
+    t0 = time.perf_counter()
+    log.info("[analyse/full] GEMINI CALL START pages=%d", len(blobs))
     try:
         client = genai.Client(api_key=api_key)
         result = await asyncio.to_thread(
@@ -1005,8 +1020,19 @@ async def post_api_v1_analyse_full(
             check_level=check_canon,
         )
     except Exception as e:
-        log.exception("analyse/full failed")
+        log.exception(
+            "[analyse/full] GEMINI CALL FAILED elapsed=%.2fs error=%s",
+            time.perf_counter() - t0, e,
+        )
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    elapsed = time.perf_counter() - t0
+    log.info(
+        "[analyse/full] GEMINI CALL DONE elapsed=%.2fs marks_awarded=%s confidence=%s annotations=%d",
+        elapsed,
+        result.get("marks_awarded"),
+        result.get("confidence_percent"),
+        len(result.get("annotations", [])),
+    )
     out = dict(result)
     out["model_id"] = model_id.strip()
     out["question_id"] = question_id.strip()
@@ -1021,6 +1047,11 @@ async def post_api_v1_analyse_cached_ocr(
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
+    log.info(
+        "[analyse/cached-ocr] REQUEST user=%s model_id=%s question_id=%s check_level=%s text_len=%d",
+        user["id"], payload.model_id.strip(), payload.question_id.strip(),
+        payload.check_level, len(payload.cached_student_text),
+    )
     resolved = _resolve_question_grading_context(
         str(user["id"]),
         payload.model_id.strip(),
@@ -1038,10 +1069,19 @@ async def post_api_v1_analyse_cached_ocr(
         check_canon,
         page_count,
     ) = resolved
+    log.info(
+        "[analyse/cached-ocr] CONTEXT question=%r marks=%d lang=%s check=%s page_count=%d instruction=%s",
+        question_title[:80], total_marks, lang, check_canon, page_count, bool(instr_eff),
+    )
     try:
         api_key = load_api_key()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
+    t0 = time.perf_counter()
+    log.info(
+        "[analyse/cached-ocr] GEMINI CALL START text_len=%d page_count=%d",
+        len(payload.cached_student_text), page_count,
+    )
     try:
         client = genai.Client(api_key=api_key)
         result = await asyncio.to_thread(
@@ -1057,8 +1097,19 @@ async def post_api_v1_analyse_cached_ocr(
             check_level=check_canon,
         )
     except Exception as e:
-        log.exception("/analyse/cached-ocr failed")
+        log.exception(
+            "[analyse/cached-ocr] GEMINI CALL FAILED elapsed=%.2fs error=%s",
+            time.perf_counter() - t0, e,
+        )
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    elapsed = time.perf_counter() - t0
+    log.info(
+        "[analyse/cached-ocr] GEMINI CALL DONE elapsed=%.2fs marks_awarded=%s confidence=%s annotations=%d",
+        elapsed,
+        result.get("marks_awarded"),
+        result.get("confidence_percent"),
+        len(result.get("annotations", [])),
+    )
     out = dict(result)
     out["model_id"] = payload.model_id.strip()
     out["question_id"] = payload.question_id.strip()

@@ -14,7 +14,7 @@ from google.genai import types
 
 log = logging.getLogger(__name__)
 
-ANALYSE_MODEL = os.environ.get("GEMINI_ANALYSE_MODEL")
+ANALYSE_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
 CFG_PAGES = types.GenerateContentConfig(
     temperature=0.2,
@@ -647,6 +647,8 @@ def _call_gemini_analysis(
 ) -> dict[str, Any]:
     last_err: Exception | None = None
     for attempt in range(1, 4):
+        t0 = time.perf_counter()
+        log.info("[gemini_analysis] attempt=%d model=%s total_marks=%d page_count=%d", attempt, ANALYSE_MODEL, total_marks, page_count)
         try:
             cfg = config.model_copy(update={"response_schema": _ANALYSIS_SCHEMA})
             response = client.models.generate_content(
@@ -655,13 +657,15 @@ def _call_gemini_analysis(
                 config=cfg,
             )
             text = getattr(response, "text", None) or ""
+            log.info("[gemini_analysis] attempt=%d response_len=%d elapsed=%.2fs", attempt, len(text), time.perf_counter() - t0)
             if not text:
                 raise RuntimeError("Gemini returned no text")
             parsed = _parse_analysis_json(text, total_marks, page_count)
+            log.info("[gemini_analysis] parsed marks_awarded=%s confidence=%s annotations=%d", parsed.get("marks_awarded"), parsed.get("confidence_percent"), len(parsed.get("annotations", [])))
             return parsed
         except Exception as e:
             last_err = e
-            log.warning("Analysis attempt %s failed: %s", attempt, e)
+            log.warning("[gemini_analysis] attempt=%d FAILED elapsed=%.2fs error=%s", attempt, time.perf_counter() - t0, e)
             if attempt < 3:
                 time.sleep(0.3 * attempt)
     assert last_err is not None
