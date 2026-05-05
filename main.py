@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from datetime import datetime, timedelta, timezone
 import logging
@@ -19,8 +20,8 @@ from passlib.context import CryptContext
 from google import genai
 from src.gemini_analyse import (
     analyse_cached_ocr,
+    analyse_full_images,
     analyse_intro_page,
-    analyse_pages,
     generate_combined_review,
 )
 from src.custom_booklet_storage import custom_qna_rows_to_canonical_questions
@@ -73,6 +74,8 @@ from src.schemas import (
     CombinedReviewRequest,
     ExpandModelAnswerRequest,
     BulkQuestionPageMarksPayload,
+    FullAnalysisRequest,
+    IntroPageJsonRequest,
     QuestionPayload,
     ReorderQuestionsPayload,
     TokenData,
@@ -824,52 +827,149 @@ async def post_model_answer_expand(
     )
 
 
-@app.post("/analyse/pages")
-async def post_analyse_pages(
-    request: Request,
-    pages: list[UploadFile] = File(...),
-    question_title: str = Form(...),
-    model_description: str = Form(...),
-    total_marks: int = Form(...),
-    language: str = Form(...),
+def _decode_page_images_base64(items: list[str]) -> list[bytes]:
+    blobs: list[bytes] = []
+    for i, item in enumerate(items):
+        try:
+            raw = base64.b64decode(item.strip(), validate=False)
+        except Exception:
+            raise ValueError(f"Invalid base64 at pageImagesBase64[{i}]") from None
+        if not raw:
+            raise ValueError(f"Empty image bytes at pageImagesBase64[{i}]")
+        blobs.append(raw)
+    return blobs
+
+
+@app.post("/analyse/full")
+async def post_api_v1_analyse_full(
+    request: Request, payload: FullAnalysisRequest
 ) -> JSONResponse:
-    """Analyses uploaded pages against model criteria and returns scoring."""
+    """Full-page-image analysis (Flutter ``GeminiService.analyse`` replacement)."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    if not pages:
-        return JSONResponse(_err("pages field is required"))
-    if total_marks < 1:
-        return JSONResponse(_err("total_marks must be a positive integer"))
-    lang = language.strip().lower()
+    lang = payload.language.strip().lower()
     if not _valid_lang(lang):
         return JSONResponse(_err("language must be en or hi"))
+    check_canon = normalize_evaluation_check_level(payload.check_level)
+    if not check_canon:
+        return JSONResponse(
+            _err('checkLevel must be "Moderate" or "Hard" (JSON field checkLevel).')
+        )
+    try:
+        blobs = _decode_page_images_base64(payload.page_images_base64)
+    except ValueError as e:
+        return JSONResponse(_err(str(e)), status_code=400)
     try:
         api_key = load_api_key()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
-    blobs: list[bytes] = []
-    for p in pages:
-        raw = await p.read()
-        if raw:
-            blobs.append(raw)
-    if not blobs:
-        return JSONResponse(_err("pages field is required"))
     try:
         client = genai.Client(api_key=api_key)
         result = await asyncio.to_thread(
-            analyse_pages,
+            analyse_full_images,
             client,
             blobs,
-            question_title.strip(),
-            model_description.strip(),
-            total_marks,
+            payload.question_title.strip(),
+            payload.model_description.strip(),
+            payload.total_marks,
             lang,
+            instruction_name=payload.instruction_name,
+            check_level=check_canon,
         )
     except Exception as e:
-        log.exception("analyse/pages failed")
+        log.exception("analyse/full failed")
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
     return JSONResponse(_ok("Analysis complete.", **result))
+
+
+@app.post("/analyse/cached-ocr")
+async def post_api_v1_analyse_cached_ocr(
+    request: Request, payload: CachedOcrRequest
+) -> JSONResponse:
+    """Cached OCR re-analysis (Flutter ``GeminiService._analyseFromCachedText`` replacement)."""
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    lang = payload.language.strip().lower()
+    if not _valid_lang(lang):
+        return JSONResponse(_err("language must be en or hi"))
+    check_canon = normalize_evaluation_check_level(payload.check_level)
+    if not check_canon:
+        return JSONResponse(
+            _err('checkLevel must be "Moderate" or "Hard" (JSON field checkLevel).')
+        )
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(
+            analyse_cached_ocr,
+            client,
+            payload.cached_student_text,
+            payload.question_title.strip(),
+            payload.model_description.strip(),
+            payload.total_marks,
+            payload.page_count,
+            lang,
+            instruction_name=payload.instruction_name,
+            check_level=check_canon,
+        )
+    except Exception as e:
+        log.exception("/analyse/cached-ocr failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Analysis complete.", **result))
+
+
+@app.post("/analyse/combined-review")
+async def post_api_v1_combined_review(
+    request: Request, payload: CombinedReviewRequest
+) -> JSONResponse:
+    """End-of-paper combined review (Flutter combined key review replacement)."""
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    rows = [q.model_dump(by_alias=True) for q in payload.question_results]
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(generate_combined_review, client, rows)
+    except Exception as e:
+        log.exception("/analyse/combined-review failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Combined review generated.", **result))
+
+
+@app.post("/analyse/intro-page")
+async def post_api_v1_analyse_intro_page(
+    request: Request, payload: IntroPageJsonRequest
+) -> JSONResponse:
+    """Intro/cover marks table extraction (Flutter ``analyseIntroPage`` replacement)."""
+    user, auth_err = _require_auth_user(request)
+    if auth_err:
+        return auth_err
+    try:
+        raw = base64.b64decode(payload.page_image_base64.strip(), validate=False)
+    except Exception:
+        return JSONResponse(_err("Invalid pageImageBase64."), status_code=400)
+    if not raw:
+        return JSONResponse(_err("pageImageBase64 decodes to empty bytes."), status_code=400)
+    try:
+        api_key = load_api_key()
+    except ValueError as e:
+        return JSONResponse(_err(str(e)))
+    try:
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(analyse_intro_page, client, raw)
+    except Exception as e:
+        log.exception("/analyse/intro-page failed")
+        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
+    return JSONResponse(_ok("Intro page analysed.", **result))
 
 
 @app.post("/analyse/copy-ocr")
@@ -1250,90 +1350,6 @@ async def post_analyse_smart_ocr(
             **extra,
         )
     )
-
-
-@app.post("/analyse/cached-ocr")
-async def post_analyse_cached_ocr(
-    request: Request, payload: CachedOcrRequest
-) -> JSONResponse:
-    """Analyses cached OCR text and returns scoring and feedback details."""
-    user, auth_err = _require_auth_user(request)
-    if auth_err:
-        return auth_err
-    lang = payload.language.strip().lower()
-    if not _valid_lang(lang):
-        return JSONResponse(_err("language must be en or hi"))
-    try:
-        api_key = load_api_key()
-    except ValueError as e:
-        return JSONResponse(_err(str(e)))
-    try:
-        client = genai.Client(api_key=api_key)
-        result = await asyncio.to_thread(
-            analyse_cached_ocr,
-            client,
-            payload.cached_student_text,
-            payload.question_title.strip(),
-            payload.model_description.strip(),
-            payload.total_marks,
-            payload.page_count,
-            lang,
-        )
-    except Exception as e:
-        log.exception("analyse/cached-ocr failed")
-        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
-    return JSONResponse(_ok("Analysis complete.", **result))
-
-
-@app.post("/analyse/combined-review")
-async def post_combined_review(
-    request: Request, payload: CombinedReviewRequest
-) -> JSONResponse:
-    """Combines question-level analysis results into one final review."""
-    user, auth_err = _require_auth_user(request)
-    if auth_err:
-        return auth_err
-    try:
-        api_key = load_api_key()
-    except ValueError as e:
-        return JSONResponse(_err(str(e)))
-    rows = [q.model_dump() for q in payload.question_results]
-    try:
-        client = genai.Client(api_key=api_key)
-        result = await asyncio.to_thread(generate_combined_review, client, rows)
-    except Exception as e:
-        log.exception("analyse/combined-review failed")
-        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
-    return JSONResponse(_ok("Combined review generated.", **result))
-
-
-@app.post("/analyse/intro-page")
-async def post_analyse_intro_page(
-    request: Request, page: UploadFile = File(...)
-) -> JSONResponse:
-    """Parses intro page content to extract student and exam metadata."""
-    user, auth_err = _require_auth_user(request)
-    if auth_err:
-        return auth_err
-    raw = await page.read()
-    if not raw:
-        return JSONResponse(_err("page field is required"))
-    try:
-        api_key = load_api_key()
-    except ValueError as e:
-        return JSONResponse(_err(str(e)))
-    try:
-        client = genai.Client(api_key=api_key)
-        result = await asyncio.to_thread(analyse_intro_page, client, raw)
-    except ValueError as e:
-        if "Could not detect" in str(e) or "no text" in str(e).lower():
-            return JSONResponse(_err(str(e)), status_code=422)
-        log.exception("analyse/intro-page failed")
-        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
-    except Exception as e:
-        log.exception("analyse/intro-page failed")
-        return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
-    return JSONResponse(_ok("Intro page analysed.", **result))
 
 
 @app.post("/analyse/free-space")

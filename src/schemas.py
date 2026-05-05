@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class QuestionPayload(BaseModel):
@@ -42,27 +42,55 @@ class BulkQuestionPageMarksPayload(BaseModel):
     intro_page: int | None = Field(default=None, ge=1)
 
 
-class CachedOcrRequest(BaseModel):
-    cached_student_text: str = Field(min_length=1)
-    question_title: str
-    model_description: str
-    total_marks: int = Field(ge=1)
-    page_count: int = Field(ge=1)
+class FullAnalysisRequest(BaseModel):
+    """JSON body for ``POST /api/v1/ai/analyse/full`` (Flutter-aligned field names)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    page_images_base64: list[str] = Field(min_length=1, alias="pageImagesBase64")
+    question_title: str = Field(alias="questionTitle")
+    instruction_name: str | None = Field(default=None, alias="instructionName")
+    model_description: str = Field(alias="modelDescription")
+    total_marks: int = Field(ge=1, alias="totalMarks")
     language: str
+    check_level: str = Field(default="Moderate", alias="checkLevel")
+
+
+class CachedOcrRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    cached_student_text: str = Field(min_length=1, alias="cachedStudentText")
+    question_title: str = Field(alias="questionTitle")
+    instruction_name: str | None = Field(default=None, alias="instructionName")
+    model_description: str = Field(alias="modelDescription")
+    total_marks: int = Field(ge=1, alias="totalMarks")
+    page_count: int = Field(ge=1, alias="pageCount")
+    language: str
+    check_level: str = Field(default="Moderate", alias="checkLevel")
 
 
 class QuestionResultItem(BaseModel):
-    question_no: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    question_no: str = Field(alias="questionNo")
     title: str
-    marks_awarded: float
-    marks_total: int
-    good_points: str
+    marks_awarded: float = Field(alias="marksAwarded")
+    marks_total: int = Field(alias="marksTotal")
+    good_points: str = Field(alias="goodPoints")
     improvements: str
-    final_review: str
+    final_review: str = Field(alias="finalReview")
 
 
 class CombinedReviewRequest(BaseModel):
-    question_results: list[QuestionResultItem] = Field(min_length=1)
+    model_config = ConfigDict(populate_by_name=True)
+
+    question_results: list[QuestionResultItem] = Field(min_length=1, alias="questionResults")
+
+
+class IntroPageJsonRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    page_image_base64: str = Field(min_length=1, alias="pageImageBase64")
 
 
 class ExpandModelAnswerRequest(BaseModel):

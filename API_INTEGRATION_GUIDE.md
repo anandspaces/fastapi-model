@@ -608,20 +608,26 @@ Allow **60–180s** depending on `type` (essay responses are longer to generate)
 
 > Intro-page flow is separate and optional. If full pages are provided for grading, intro flow can be handled independently.
 
-### POST `/analyse/pages`
+### POST `/api/v1/ai/analyse/full`
 
-- Content-Type: `multipart/form-data`
+Full handwritten-page grading (Flutter-aligned JSON). Same auth envelope as other routes.
+
+- Content-Type: `application/json`
 - Auth required: Yes
 
-#### Request form fields
+#### Request JSON fields (camelCase)
 
-- `pages` (repeatable image files, required)
-- `question_title` (string, required)
-- `model_description` (string, required)
-- `total_marks` (integer > 0, required)
+- `pageImagesBase64` (array of base64-encoded JPEG/PNG bytes, required, non-empty)
+- `questionTitle` (string, required)
+- `instructionName` (string, optional)
+- `modelDescription` (string, required)
+- `totalMarks` (integer > 0, required)
 - `language` (`en` or `hi`, required)
+- `checkLevel` (`Moderate` or `Hard`, optional; default `Moderate`)
 
 #### Success Response (`200`)
+
+All keys under `data` are **snake_case**.
 
 ```json
 {
@@ -689,7 +695,7 @@ Whole-PDF OCR for a **single-question essay-style student answer** (handwriting 
 
 #### AI / parsing failures (`500`)
 
-Same pattern as `/analyse/pages`: `status: 0`, `message` prefixed with `AI service error:`.
+Same pattern as `/api/v1/ai/analyse/full`: `status: 0`, `message` prefixed with `AI service error:`.
 
 #### Client timeouts
 
@@ -740,48 +746,50 @@ Same pattern as `/analyse/copy-ocr` (`status: 0` for validation, `500` + `AI ser
 
 ---
 
-### POST `/analyse/cached-ocr`
+### POST `/api/v1/ai/analyse/cached-ocr`
 
 - Content-Type: `application/json`
 - Auth required: Yes
 
-#### Request
+#### Request (camelCase)
 
 ```json
 {
-  "cached_student_text": "OCR text from previous response...",
-  "question_title": "Q3...",
-  "model_description": "Marking scheme...",
-  "total_marks": 8,
-  "page_count": 2,
-  "language": "en"
+  "cachedStudentText": "OCR text from previous response...",
+  "questionTitle": "Q3...",
+  "instructionName": "optional examiner notes",
+  "modelDescription": "Marking scheme...",
+  "totalMarks": 8,
+  "pageCount": 2,
+  "language": "en",
+  "checkLevel": "Moderate"
 }
 ```
 
 #### Success Response (`200`)
 
-Same structure as `/analyse/pages`.
+Same shape as **`/api/v1/ai/analyse/full`** (snake_case `data`). `data.student_text` is always the **request’s** `cachedStudentText`.
 
 ---
 
-### POST `/analyse/combined-review`
+### POST `/api/v1/ai/analyse/combined-review`
 
 - Content-Type: `application/json`
 - Auth required: Yes
 
-#### Request
+#### Request (camelCase)
 
 ```json
 {
-  "question_results": [
+  "questionResults": [
     {
-      "question_no": "1",
+      "questionNo": "1",
       "title": "Q1 ...",
-      "marks_awarded": 6.0,
-      "marks_total": 8,
-      "good_points": "• ...",
+      "marksAwarded": 6.0,
+      "marksTotal": 8,
+      "goodPoints": "• ...",
       "improvements": "• ...",
-      "final_review": "..."
+      "finalReview": "..."
     }
   ]
 }
@@ -794,7 +802,7 @@ Same structure as `/analyse/pages`.
   "status": 1,
   "message": "Combined review generated.",
   "data": {
-    "final_review": "Long consolidated review...",
+    "overall_review": "Long consolidated review...",
     "overall_improvements": "Line1\nLine2\nLine3\nLine4",
     "one_thing_to_write": "Single top practice action."
   }
@@ -813,14 +821,14 @@ Same structure as `/analyse/pages`.
 
 ---
 
-### POST `/analyse/intro-page`
+### POST `/api/v1/ai/analyse/intro-page`
 
-- Content-Type: `multipart/form-data`
+- Content-Type: `application/json`
 - Auth required: Yes
 
-#### Request form fields
+#### Request JSON
 
-- `page` (single image, required)
+- `pageImageBase64` (single JPEG/PNG image as base64, required)
 
 #### Success Response (`200`)
 
@@ -841,15 +849,7 @@ Same structure as `/analyse/pages`.
 }
 ```
 
-#### Controlled No-table Response (`422`)
-
-```json
-{
-  "status": 0,
-  "message": "Could not detect a marks table on this page",
-  "data": {}
-}
-```
+`cells` may be an empty array if no table rows could be parsed.
 
 ---
 
@@ -886,11 +886,11 @@ Same structure as `/analyse/pages`.
    - manage via `GET/PUT/DELETE /models*` endpoints
    - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `custom_with_model` / `essay` for length — see section 5)
 5. For AI checking workflow:
-   - `POST /analyse/pages`
+   - `POST /api/v1/ai/analyse/full` (JSON base64 page images + grading)
    - optional `POST /analyse/copy-ocr` or `POST /analyse/copy-ocr-rasterization` (essay PDF → plain `text` + `pageCount`, no DB; rasterization = per-page parallel OCR)
-   - optionally `POST /analyse/cached-ocr`
-   - `POST /analyse/combined-review`
-   - optionally `POST /analyse/intro-page` (separate intro-only use case)
+   - optionally `POST /api/v1/ai/analyse/cached-ocr`
+   - `POST /api/v1/ai/analyse/combined-review`
+   - optionally `POST /api/v1/ai/analyse/intro-page` (separate intro-only use case; JSON `pageImageBase64`)
 
 ### Token Usage
 
@@ -904,8 +904,6 @@ Authorization: Bearer <accessToken>
 - `POST /models/answer-booklet` for a key with `type=custom`, `type=custom_with_model`, or `type=essay` can take several minutes (one Gemini call per extracted question plus the import pass; `essay` answers are longer to generate).
 - `POST /model/answer-expand`: allow at least **60–180s**; prefer the upper end when `type` is `essay`.
 - Retry on network failures and `5xx` with exponential backoff.
-- For `/analyse/intro-page`, treat `422` as a valid “not detected” business outcome.
-
 ---
 
 ## 9) Quick cURL Snippets
@@ -988,24 +986,23 @@ curl -X POST "http://127.0.0.1:8000/analyse/copy-ocr-rasterization" \
   -F "language=en"
 ```
 
-### Analyse pages
+### Analyse full (JSON base64 images)
+
+Build `PAGE_B64` with `base64 -w0 page1.jpg` (or your tooling), then:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/analyse/pages" \
+curl -X POST "http://127.0.0.1:8000/api/v1/ai/analyse/full" \
   -H "Authorization: Bearer <token>" \
-  -F "pages=@/absolute/path/page1.jpg" \
-  -F "pages=@/absolute/path/page2.jpg" \
-  -F "question_title=Q3. Explain photosynthesis..." \
-  -F "model_description=Key points..." \
-  -F "total_marks=8" \
-  -F "language=en"
+  -H "Content-Type: application/json" \
+  -d "{\"pageImagesBase64\":[\"$PAGE_B64\"],\"questionTitle\":\"Q3...\",\"modelDescription\":\"Key points...\",\"totalMarks\":8,\"language\":\"en\",\"checkLevel\":\"Moderate\"}"
 ```
 
-### Analyse intro page
+### Analyse intro page (JSON base64)
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/analyse/intro-page" \
+curl -X POST "http://127.0.0.1:8000/api/v1/ai/analyse/intro-page" \
   -H "Authorization: Bearer <token>" \
-  -F "page=@/absolute/path/intro_page.jpg"
+  -H "Content-Type: application/json" \
+  -d "{\"pageImageBase64\":\"$PAGE_B64\"}"
 ```
 

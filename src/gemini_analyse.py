@@ -1,9 +1,10 @@
-"""Gemini-powered copy-checker analysis (grading, combined review, intro marks table)."""
+"""Gemini analysis flows for copy-check grading; HTTP ``data`` uses snake_case keys."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -13,9 +14,8 @@ from google.genai import types
 
 log = logging.getLogger(__name__)
 
-ANALYSE_MODEL = "gemini-3.1-pro-preview"
+ANALYSE_MODEL = os.environ.get("GEMINI_ANALYSE_MODEL")
 
-# Generation configs per endpoint (spec)
 CFG_PAGES = types.GenerateContentConfig(
     temperature=0.2,
     max_output_tokens=8192,
@@ -37,7 +37,6 @@ CFG_COMBINED = types.GenerateContentConfig(
 CFG_INTRO = types.GenerateContentConfig(
     temperature=0.0,
     max_output_tokens=2048,
-    # omit response_mime_type — plain pipe-delimited text
 )
 
 _ANALYSIS_SCHEMA = types.Schema(
@@ -96,151 +95,292 @@ _COMBINED_SCHEMA = types.Schema(
 )
 
 
-FEEDBACK_TONE_BLOCK = """
-FEEDBACK VOICE — UPSC MAINS SCRIPT MENTOR (NOT COACH CHEERLEADING):
-- Comments and bullet feedback read like examiner + senior tutor: restrained, rigorous, usefulness-first.
-- Ban empty superlatives and blanket praise ('Excellent answer', 'Outstanding', 'Very well written' without diagnosis).
-- good_points: only **specific**, mark-earning virtues (with a terse why they matter versus a generic script).
-- improvements plus annotation comments: lead with gaps, sharper structure, absent dimension, factual precision, illustrative depth — show how to climb the marking ladder next.
-- Maintain respect; warmth is spare — encouragement comes through clarity of next steps.
-"""
+INTRO_PAGE_PROMPT = """You are analysing the COVER / INTRO page of a student exam answer sheet.
 
-MARKING_RULES_BLOCK = """
-MARKING RULES (NON-NEGOTIABLE):
-- NEVER exceed total_marks.
-- Default to FEWER marks, not more.
-- FULL marks: answer nearly perfectly matches scheme, all key points, correct terminology.
-- MID-RANGE: covers some points but misses important ones or lacks depth.
-- LOW marks: superficial, off-topic, or barely touches the scheme.
-- ZERO: blank, irrelevant, or copied without understanding.
-- Do NOT reward length — reward accuracy and relevance only.
-- When in doubt between two values, always choose the LOWER one.
+The page contains a MARKS TABLE with columns: Q.No. | M.Mark | M.Obt.
 
-DECIMAL MARKING:
-- marks_awarded must be a decimal in multiples of 0.5 only (e.g. 1.5, 3.5), never above total_marks.
-- Scale proportionally for other totals; reference tiers:
-  - For an 8-mark question: excellent ≈ 3.5, moderate ≈ 2.5, low ≈ 1.5 (relative to scheme quality).
-  - For a 12-mark question: excellent ≈ 5, moderate ≈ 3, low ≈ 2.5 (relative to scheme quality).
-"""
+TASK:
+1. Find the M.Obt. column (where the teacher writes the marks obtained).
+2. For EVERY row in that table — question rows AND the Total row — output one line in this exact format:
+   questionNo|marksText|xPercent|yPercent
+   - questionNo : integer (use 0 for the Total/Grand-Total row)
+   - marksText  : the handwritten number if visible, otherwise leave it empty (nothing between the pipes)
+   - xPercent   : horizontal centre of the M.Obt. cell as % of page width (0–100)
+   - yPercent   : vertical centre of the M.Obt. cell as % of page height (0–100)
+3. Include ALL rows, even if M.Obt. cell is empty.
+4. Output ONLY the data lines. No headers, no explanation, no JSON, no markdown.
 
-ANNOTATION_RULES_BLOCK = """
-ANNOTATION PLACEMENT RULES:
-- Same page, same side: y_position_percent must differ by at least 20 between annotations.
-- Opposite sides on same page can share similar y positions.
-- Left half: x_end_percent ≤ 55. Right half: x_start_percent ≥ 45.
-- Spread across pages — do not cluster on page 0.
-- Density: roughly 2–4 annotations per handwritten page when the answer is substantive; proportionally fewer on sparse pages.
-- Cover the answer structure in comments: aim for annotations on opening/introduction framing, middle argument or evidence, and closing/conclusion synthesis (adapt to whatever structure the student actually wrote).
-- Comment wording: UPSC script-mentor tone — spare praise, high diagnostic yield; use is_positive true only for genuinely distinctive merits.
+Example (values are illustrative only — use real values from the image):
+1|4|74|30
+2||74|33
+3|3.5|74|36
+0|91|74|88
 """
 
 
-def _hi_language_block() -> str:
-    return """
-LANGUAGE (Hindi, language=hi):
-- All feedback strings (good_points, improvements, final_review, annotation comments) MUST be in Hindi.
-- Use formal address: "Aap/Aapka"; avoid "Tum/Tumne".
-- Prefer formal terms (e.g. Prastavana/Parichay for introduction where appropriate).
-- Avoid casual praise like "Shabash" and exaggerated appreciation; tone = गंभीर मार्गदर्शक परीक्षक (संयत, विश्लेषणात्मक).
-"""
+def _check_level_instruction(check_level: str) -> str:
+    return (
+        "- EVALUATION STRICTNESS: HARD. Be extremely strict. All answers must be strictly evaluated and normally score less than 50% of the total marks unless they are absolutely perfect without any flaws."
+        if check_level.strip().lower() == "hard"
+        else "- EVALUATION STRICTNESS: MODERATE. Grade normally, but keep medium or average answers around or below 50% of the total marks."
+    )
 
 
-def _en_language_block() -> str:
-    return """
-LANGUAGE (English, language=en):
-- All feedback strings must be in English only — formal, mains-exam tone; no slangy hype or empty praise clusters.
-"""
+def _instruction_block(instruction_name: str | None) -> str:
+    if instruction_name and instruction_name.strip():
+        return f"EXTRA ANSWER INSTRUCTIONS:\n{instruction_name.strip()}\n\n"
+    return ""
 
 
-def build_analyse_prompt(
+def _language_block_teacher(language: str) -> str:
+    lang = language.strip().lower()
+    if lang == "hi":
+        return """LANGUAGE INSTRUCTION:
+This is a Hindi-medium question paper. Write ALL feedback fields (goodPoints, improvements, finalReview, annotation comments) ENTIRELY in Hindi. No English feedback text at all.
+
+HINDI VOCABULARY RULES (apply strictly):
+- Use "saraahaniyan" or "Utkrisht" for praise — NOT just "achha".
+- Use "Prayas" when noting effort.
+- Nishkarsh (conclusion) must be future-oriented: "Aapka nishkarsh bhavishya unmukhi hona chahiye."
+- Address the student as "Aap" / "Aapka" — NEVER "Tumne" or "Tu".
+- "Introduction" → write "Prashtavana" or "Parichay" — never the English word.
+- NEVER use the word "Shabash".
+- "Utpatti" → use "Prashtuti".
+- Strong conclusion: "Aapka nishkarsh prabhavshali hai."
+- Line could be more specific: "Yah line aur vishishth ho sakti hai; udaharan ke sath samjhaya ja sakta tha."
+- Replace "Sahi dhang se samjhaya hai" with "Sahi dhang se prastut kiya hai." """
+    return """LANGUAGE INSTRUCTION:
+This is an English-medium question paper. Write ALL feedback fields (goodPoints, improvements, finalReview, annotation comments) ENTIRELY in English. No Hindi feedback text at all."""
+
+
+def build_full_analysis_prompt(
+    *,
     question_title: str,
     model_description: str,
     total_marks: int,
     language: str,
-    *,
-    page_count: int | None,
-    mode: str,
+    instruction_name: str | None,
+    check_level: str,
+    max_page_index: int,
 ) -> str:
-    """mode: 'pages' | 'cached_ocr'"""
-    lang = language.strip().lower()
-    lang_rules = _hi_language_block() if lang == "hi" else _en_language_block()
-    pc = (
-        f"The student's answer spans {page_count} page(s). Use page_index 0..{page_count - 1} for annotations."
-        if page_count is not None
-        else ""
-    )
-    ocr_note = (
-        "You are given the student's handwritten answer as one or more page images in order. "
-        "Perform full OCR. Attempt to read light or sparse handwriting; do not skip pages."
-        if mode == "pages"
-        else "You are given cached OCR text of the student's answer (no images). "
-        "Use it as the student_text basis and grade accordingly."
-    )
-    return f"""You are a senior examiner acting as UPSC mains script mentor — grade against the marking scheme with professional, restrained feedback.
+    check_level_instruction = _check_level_instruction(check_level)
+    ib = _instruction_block(instruction_name)
+    lb = _language_block_teacher(language)
+    return f"""You are a warm, experienced school teacher who genuinely cares about students improving. You are grading a handwritten student answer sheet. You write feedback the same way a real teacher would — personal, specific, encouraging where deserved, and honest where correction is needed.
 
-{ocr_note}
+You will be provided with images of the student's answer pages in sequence. Some pages may appear mostly white or contain very little visible ink — the student may have written lightly or used a light pen. ALWAYS attempt to read all pages. If a page genuinely has no answer at all, note it but still grade the rest of the answer.
 
-QUESTION TITLE:
+{ib}QUESTION TITLE:
 {question_title}
 
-TEACHER MARKING SCHEME / MODEL ANSWER:
+MODEL ANSWER / MARKING SCHEME (what the teacher expects):
 {model_description}
 
 TOTAL MARKS FOR THIS QUESTION: {total_marks}
-{pc}
 
-{MARKING_RULES_BLOCK}
+MARKING RULES (NON-NEGOTIABLE — apply like a strict board examiner):
+{check_level_instruction}
+- Award marksAwarded as a DECIMAL in multiples of 0.5 (e.g. 0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5 …). NEVER exceed {total_marks}.
+- Marking tiers by question size:
+    8-mark question  → Bahot achha (excellent): 3.5  |  Moderate: 2.5  |  Low: 1.5
+    12-mark question → Bahot achha (excellent): 5    |  Moderate: 3    |  Low: 2.5
+    Other totals     → scale proportionally using 0.5-step decimals.
+- You are a STRICT examiner. Default to FEWER marks, not more.
+- FULL marks ONLY if answer nearly perfectly matches the scheme — all key points, correct terminology, clear reasoning. This is rare.
+- Do NOT reward effort or length — reward accuracy and relevance only.
+- A long but mostly irrelevant answer scores LOW. A short precise answer can outscore a long vague one.
+- Do NOT give benefit of the doubt. If a key point is not clearly stated, do not assume it was implied.
+- Deduct for: wrong facts, missing key terms, no examples when required, incorrect conclusions.
+- When in doubt between two values, always choose the LOWER one.
 
-{FEEDBACK_TONE_BLOCK}
+YOUR TASKS:
 
-{ANNOTATION_RULES_BLOCK}
+1. READ the handwritten text from all images (including labels, captions, diagram text).
+2. GRADE objectively against the marking scheme. If the scheme expects diagrams/figures, evaluate whether the student addressed those (sketches, descriptions, labels).
+3. ANNOTATE the answer: mark 2–5 specific spots in the student's writing with short teacher-style comments. Make annotations PRECISE — annotate only the specific word/phrase, not the whole line.
 
-{lang_rules}
+ANNOTATION PLACEMENT RULES (CRITICAL — prevents overlapping comments):
+- On any single page, every annotation MUST have a yPositionPercent that differs by AT LEAST 12 from every other annotation on that same page. Space them out evenly across the page height.
+- If two annotations are naturally close together (within 12% of each other vertically), pick only the more important one; do NOT place both at nearly the same y position.
+- Alternate comment placement: for annotations that are on the LEFT half of the text (xEndPercent < 55), keep xEndPercent ≤ 55. For annotations on the RIGHT half (xStartPercent > 45), keep xStartPercent ≥ 45. This ensures comments are anchored to different horizontal zones and do not collide.
+- Prefer spreading annotations across different pages when the answer spans multiple pages — do not cluster all annotations on page 0.
+- IMPORTANT: ALL annotations MUST have "isPositive": true. Only circle/annotate things done correctly. Do NOT mark errors with annotations — errors should be mentioned in the "improvements" field instead.
 
-OUTPUT: Return ONE JSON object only (no markdown) with keys:
-- student_text: string, full transcription of the student's answer (from OCR for images, or echo/normalize cached text for cached mode).
-- marks_awarded: number, 0 to {total_marks}, steps of 0.5 only.
-- confidence_percent: number, 0–100, your confidence in this grading.
-- good_points: string, bullet points with leading "• " lines, teacher-style strengths.
-- improvements: string, bullet points with "• ", teacher-style improvements.
-- final_review: string, 2–4 sentences overall remark — examiner summary: measured verdict + priority fixes; avoid gushing praise.
-- annotations: array of objects, each with:
-  page_index (0-based), y_position_percent, x_start_percent, x_end_percent, comment, is_positive (boolean), line_style ("straight" or "zigzag").
+TONE & LANGUAGE GUIDELINES:
 
-Produce **meaningful granularity**: for multi-paragraph answers use **at least 5 annotations** when page_count ≥ 2, otherwise **at least 3**. Put concrete strengths and fixes in annotation ``comment`` strings (not only in good_points/improvements). Prefer one annotation each for intro quality, central argument/example quality, and conclusion quality whenever those regions exist.
+Write ALL feedback as a professional yet approachable teacher would — clear, constructive, and specific. Avoid robotic phrasing. Think of the tone an experienced senior examiner uses: direct, helpful, respectful.
 
-Ensure annotations follow placement rules and match the answer content.
+GOOD annotation comments (professional but human):
+  - "Well articulated — this directly addresses the marking scheme."
+  - "Correct definition. Clear and concise."
+  - "This definition is inaccurate — please revise from your textbook."
+  - "You started well but left this point incomplete. Elaborate further next time."
+  - "Good reasoning, but the correct formula is F = ma, not F = mv."
+  - "Diagram is present but labels are missing — always label axes and units."
+
+BAD (too robotic/generic — AVOID these):
+  - "The student correctly identified the concept."
+  - "Improvement needed in this area."
+  - "Good point."
+  - "Incorrect."
+
+For goodPoints: Address the student directly and be specific about what was done well.
+For improvements: Be specific — mention what was missed and why it matters for marks.
+For finalReview: Write 2–3 sentences as a professional remark — constructive and encouraging.
+
+{lb}
+
+══════════════════════════════════════════
+OUTPUT FORMAT:
+══════════════════════════════════════════
+Return ONLY a valid JSON object (no markdown, no explanation outside JSON). Use these exact **snake_case** keys:
+{{
+  "student_text": "<transcribe the exact handwritten text you see across all pages — skip printed question headers>",
+  "marks_awarded": <decimal in multiples of 0.5, range 0 to {total_marks}; never exceed {total_marks}>,
+  "confidence_percent": <float 0-100>,
+  "good_points": "<bullet-point list — each point should sound like a real teacher praising the student>",
+  "improvements": "<bullet-point list — each point should sound like a real teacher pointing out what to fix and why>",
+  "final_review": "<2-3 sentence handwritten-note-style overall review — warm, personal, constructive>",
+  "annotations": [
+    {{
+      "page_index": <int 0-indexed corresponding to the image sequence. Maximum is {max_page_index}>,
+      "y_position_percent": <float 0-100 indicating the approximate vertical position of the specific text to underline>,
+      "x_start_percent": <float 0-100 indicating the tight horizontal start of the specific word(s) to underline>,
+      "x_end_percent": <float 0-100 indicating the tight horizontal end of the specific word(s) to underline>,
+      "comment": "<short, warm, colloquial teacher remark — praise what's right, sound human>",
+      "is_positive": true,
+      "line_style": "straight"
+    }}
+  ]
+}}
+NOTE: Every annotation MUST have "is_positive": true. Do NOT produce any negative/cross annotations. Errors should be mentioned only in the "improvements" field.
 """
 
 
-def build_combined_prompt(question_results_json: str) -> str:
-    return f"""You are a UPSC mains mentor drafting an integrated paper critique — examiner-like, restrained, diagnostically dense. Do not fluff or over-praise; synthesise patterns and actionable priorities.
+def build_cached_ocr_prompt(
+    *,
+    cached_student_text: str,
+    question_title: str,
+    model_description: str,
+    total_marks: int,
+    language: str,
+    instruction_name: str | None,
+    check_level: str,
+    page_count: int,
+) -> str:
+    check_level_instruction = _check_level_instruction(check_level)
+    ib = _instruction_block(instruction_name)
+    lb = _language_block_teacher(language)
+    max_pi = max(0, page_count - 1)
+    return f"""You are a warm, experienced school teacher who genuinely cares about students improving. You are grading a handwritten student answer sheet. You write feedback the same way a real teacher would — personal, specific, encouraging where deserved, and honest where correction is needed.
 
-PER-QUESTION RESULTS (JSON):
-{question_results_json}
+The student's handwritten answer has already been transcribed for you (OCR result):
+\"\"\"
+{cached_student_text}
+\"\"\"
 
-TASK:
-1. Write final_review: one long flowing paragraph (~150–220 words). Match the dominant language of the improvements/good_points text below (Hindi vs English). Use \\n between sentences if helpful. Acknowledge competence briefly where merited; weight the paragraph toward systematic gaps and how to tighten answer-writing for marks.
-2. Write overall_improvements: exactly 4 plain improvement sentences, one per line, separated by \\n.
-3. Write one_thing_to_write: one sentence — the single most impactful practice tip.
+{ib}QUESTION TITLE:
+{question_title}
 
-Return ONE JSON object with keys: final_review, overall_improvements, one_thing_to_write only.
+MODEL ANSWER / MARKING SCHEME (what the teacher expects):
+{model_description}
+
+TOTAL MARKS FOR THIS QUESTION: {total_marks}
+
+MARKING RULES (NON-NEGOTIABLE — apply like a strict board examiner):
+{check_level_instruction}
+- Award marksAwarded as a DECIMAL in multiples of 0.5 (e.g. 0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5 …). NEVER exceed {total_marks}.
+- Marking tiers by question size:
+    8-mark question  → Bahot achha (excellent): 3.5  |  Moderate: 2.5  |  Low: 1.5
+    12-mark question → Bahot achha (excellent): 5    |  Moderate: 3    |  Low: 2.5
+    Other totals     → scale proportionally using 0.5-step decimals.
+- You are a STRICT examiner. Default to FEWER marks, not more.
+- FULL marks ONLY if answer nearly perfectly matches the scheme — all key points, correct terminology, clear reasoning. This is rare.
+- Do NOT reward effort or length — reward accuracy and relevance only.
+- A long but mostly irrelevant answer scores LOW. A short precise answer can outscore a long vague one.
+- Do NOT give benefit of the doubt. If a key point is not clearly stated, do not assume it was implied.
+- Deduct for: wrong facts, missing key terms, no examples when required, incorrect conclusions.
+- When in doubt between two values, always choose the LOWER one.
+
+YOUR TASKS:
+
+1. GRADE objectively against the marking scheme based on the transcribed text above.
+3. ANNOTATE the answer: mark 2–5 specific spots with short teacher-style comments. Estimate page/position from the text structure (the answer spans {page_count} page(s)).
+
+ANNOTATION PLACEMENT RULES (CRITICAL — prevents overlapping comments):
+- On any single page, every annotation MUST have a yPositionPercent that differs by AT LEAST 20 from every other annotation ON THE SAME SIDE (left or right). Space them out evenly across the page height (e.g. 10, 30, 50, 70, 90).
+- Two annotations that would be on the SAME side and within 20% of each other vertically → keep only the more important one and DISCARD the other.
+- Two annotations that are on OPPOSITE sides (one left half, one right half) CAN share a similar yPositionPercent — this is fine and encouraged to keep them visually spread.
+- Decide left vs right using xStartPercent and xEndPercent: if midX = (xStart+xEnd)/2 < 50, place it on the LEFT half (xEndPercent ≤ 50); otherwise on the RIGHT half (xStartPercent ≥ 50). Strictly alternate left/right when possible.
+- Prefer spreading annotations across different pages — do not cluster all on page 0.
+- Aim for at most 2–3 annotations per page. If you have more, move the extras to other pages or drop the least important ones.
+- IMPORTANT: ALL annotations MUST have "isPositive": true. Only mark things worth circling positively (correct facts, good phrases, relevant points). Do NOT mark errors with annotations — errors should be mentioned in the "improvements" field instead.
+
+TONE & LANGUAGE GUIDELINES:
+Write ALL feedback as a professional yet approachable teacher — clear, constructive, specific.
+
+For goodPoints: Address the student directly and be specific about what was done well.
+For improvements: Be specific — mention what was missed and why it matters for marks.
+For finalReview: Write 2–3 sentences as a professional remark — warm, personal, constructive.
+
+{lb}
+
+══════════════════════════════════════════
+OUTPUT FORMAT:
+══════════════════════════════════════════
+Return ONLY a valid JSON object (no markdown, no explanation outside JSON). Use these exact **snake_case** keys:
+{{
+  "student_text": "<exactly the OCR text shown in the quoted block above — escape properly as one JSON string>",
+  "marks_awarded": <decimal in multiples of 0.5, range 0 to {total_marks}; never exceed {total_marks}>,
+  "confidence_percent": <float 0-100>,
+  "good_points": "<bullet-point list — each point should sound like a real teacher praising the student>",
+  "improvements": "<bullet-point list — each point should sound like a real teacher pointing out what to fix and why>",
+  "final_review": "<2-3 sentence handwritten-note-style overall review — warm, personal, constructive>",
+  "annotations": [
+    {{
+      "page_index": <int 0-indexed. Maximum is {max_pi}>,
+      "y_position_percent": <float 0-100>,
+      "x_start_percent": <float 0-100>,
+      "x_end_percent": <float 0-100>,
+      "comment": "<short, warm teacher remark>",
+      "is_positive": true,
+      "line_style": "straight"
+    }}
+  ]
+}}
+NOTE: Every annotation MUST have "is_positive": true. Do NOT produce negative/cross annotations. Mention errors only in the "improvements" field.
 """
 
 
-INTRO_PAGE_PROMPT = """You are reading the first (cover/intro) page of an exam answer booklet.
-Find the printed marks table. Extract every cell in the M.Obt. (marks obtained) column.
+def build_combined_prompt(question_summary: str) -> str:
+    return f"""You are an experienced school teacher writing a detailed end-of-paper comment for a student.
+Below are the per-question analysis results:
 
-Output ONLY plain text lines, one per row, in this exact format (pipe-separated, no header):
-questionNo|marksText|xPercent|yPercent
+{question_summary}
 
-Rules:
-- questionNo: integer. Use 1,2,3,... for each question row. Use 0 for the Total / Grand Total row if present.
-- marksText: the value exactly as written (e.g. "4", "3.5", "3-75"). Use empty string if blank.
-- xPercent, yPercent: horizontal and vertical centre of that M.Obt. cell as percentages of page width/height (0–100).
+YOUR TASK:
+Write a "final_review" JSON field that is a flowing, natural paragraph-style teacher comment of AT LEAST 150 words (aim for 180-220 words). It should read exactly like a real teacher's handwritten remark at the end of a corrected answer sheet — warm, personal, specific, and professional.
 
-Include every row even when marksText is blank so positions are known.
-Do not output JSON or markdown — only lines of text.
+Structure (all in one block of plain prose, no headings, no bullets, no numbering, no markdown):
+1. Start with 2-3 sentences acknowledging what the student did well across the paper, mentioning specific questions or topics.
+2. Write 3-4 sentences identifying the most important weaknesses, with concrete examples from the student's answers (e.g. "In Q3 you left the conclusion incomplete…").
+3. Give 2-3 sentences of clear, actionable advice on how to improve — specific study tips or practice habits.
+4. End with 1-2 encouraging sentences motivating the student to keep working hard.
+
+Keep every sentence natural and conversational — the way a teacher actually writes, not like a report. Do NOT use any symbols, asterisks, or special characters.
+
+Also return:
+- "overall_improvements": 4 plain sentences of improvement points (one per line, no symbols).
+- "one_thing_to_write": ONE sentence — the single most impactful practice tip.
+
+LANGUAGE: Match the dominant language in the question improvements above (Hindi or English).
+
+Return ONLY valid JSON (snake_case keys), no markdown:
+{{
+  "final_review": "<flowing paragraph of 150-220 words, sentences separated by \\n>",
+  "overall_improvements": "<4 lines separated by \\n>",
+  "one_thing_to_write": "<one sentence>"
+}}
 """
 
 
@@ -261,11 +401,8 @@ def _strip_json_fence(text: str) -> str:
 
 
 def _repair_json(text: str) -> str:
-    """Best-effort repair for truncated / sloppy JSON."""
     t = _strip_json_fence(text)
-    # remove trailing commas before } or ]
     t = re.sub(r",\s*([}\]])", r"\1", t)
-    # balance braces/brackets (simple)
     open_b = t.count("{") - t.count("}")
     open_sq = t.count("[") - t.count("]")
     if open_b > 0:
@@ -288,39 +425,62 @@ def _clamp_marks(marks: float, total_marks: int) -> float:
     return m
 
 
-def _clamp_annotations(annotations: list[dict], page_count: int) -> list[dict]:
+def _first_key(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return default
+
+
+def _clamp_annotations_response(
+    annotations: list[Any], page_count: int
+) -> list[dict[str, Any]]:
+    """Normalize annotations to API snake_case keys (Gemini may return camelCase)."""
     if page_count <= 0:
         return []
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for a in annotations:
         if not isinstance(a, dict):
             continue
+        raw_pi = _first_key(a, "pageIndex", "page_index", default=0)
         try:
-            pi = int(a.get("page_index", 0))
+            pi = int(raw_pi)
         except (TypeError, ValueError):
             pi = 0
         pi = max(0, min(page_count - 1, pi))
-        line_style = str(a.get("line_style", "straight")).lower()
-        if line_style not in ("straight", "zigzag"):
-            line_style = "straight"
+        ls = str(_first_key(a, "lineStyle", "line_style", default="straight")).lower()
+        if ls not in ("straight", "zigzag"):
+            ls = "straight"
         out.append(
             {
                 "page_index": pi,
-                "y_position_percent": float(a.get("y_position_percent", 0)),
-                "x_start_percent": float(a.get("x_start_percent", 0)),
-                "x_end_percent": float(a.get("x_end_percent", 0)),
-                "comment": str(a.get("comment", "")),
-                "is_positive": bool(a.get("is_positive", False)),
-                "line_style": line_style,
+                "y_position_percent": float(
+                    _first_key(a, "yPositionPercent", "y_position_percent", default=0)
+                ),
+                "x_start_percent": float(
+                    _first_key(a, "xStartPercent", "x_start_percent", default=0)
+                ),
+                "x_end_percent": float(
+                    _first_key(a, "xEndPercent", "x_end_percent", default=0)
+                ),
+                "comment": str(_first_key(a, "comment", default="")),
+                "is_positive": True,
+                "line_style": "straight",
             }
         )
     return out
 
 
+def _parse_string_or_list(val: Any) -> str:
+    if isinstance(val, list):
+        return "\n".join(f"• {x}" for x in val)
+    return str(val or "")
+
+
 def _parse_analysis_obj(
     data: dict[str, Any], total_marks: int, page_count: int
 ) -> dict[str, Any]:
-    raw_marks = data.get("marks_awarded", 0)
+    raw_marks = _first_key(data, "marksAwarded", "marks_awarded", default=0)
     try:
         marks = float(raw_marks)
     except (TypeError, ValueError):
@@ -328,7 +488,9 @@ def _parse_analysis_obj(
     marks = _clamp_marks(marks, total_marks)
 
     try:
-        conf = float(data.get("confidence_percent", 0))
+        conf = float(
+            _first_key(data, "confidencePercent", "confidence_percent", default=0)
+        )
     except (TypeError, ValueError):
         conf = 0.0
     conf = max(0.0, min(100.0, conf))
@@ -337,59 +499,66 @@ def _parse_analysis_obj(
     if not isinstance(ann, list):
         ann = []
 
+    gp = _parse_string_or_list(_first_key(data, "goodPoints", "good_points", default=""))
+    imp = _parse_string_or_list(
+        _first_key(data, "improvements", "improvements", default="")
+    )
+
     return {
-        "student_text": str(data.get("student_text", "")),
+        "student_text": str(_first_key(data, "studentText", "student_text", default="")),
         "marks_awarded": marks,
         "confidence_percent": conf,
-        "good_points": str(data.get("good_points", "")),
-        "improvements": str(data.get("improvements", "")),
-        "final_review": str(data.get("final_review", "")),
-        "annotations": _clamp_annotations(ann, page_count),
+        "good_points": gp,
+        "improvements": imp,
+        "final_review": str(_first_key(data, "finalReview", "final_review", default="")),
+        "annotations": _clamp_annotations_response(ann, page_count),
     }
 
 
 def _extract_analysis_fallback(text: str, total_marks: int, page_count: int) -> dict[str, Any] | None:
-    """Regex salvage when JSON is broken."""
     t = _strip_json_fence(text)
 
-    def grab_str(key: str) -> str:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:[^"\\]|\\.)*)"', t, re.DOTALL)
-        if not m:
-            return ""
-        s = m.group(1)
-        try:
-            return json.loads(f'"{s}"')
-        except json.JSONDecodeError:
-            return s.replace("\\n", "\n").replace("\\t", "\t")
-
-    def grab_num(key: str) -> float | None:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*([-0-9.]+)', t)
-        if m:
+    def grab_str(*keys: str) -> str:
+        for key in keys:
+            m = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:[^"\\]|\\.)*)"', t, re.DOTALL)
+            if not m:
+                continue
+            s = m.group(1)
             try:
-                return float(m.group(1))
-            except ValueError:
-                return None
+                return json.loads(f'"{s}"')
+            except json.JSONDecodeError:
+                return s.replace("\\n", "\n").replace("\\t", "\t")
+        return ""
+
+    def grab_num(*keys: str) -> float | None:
+        for key in keys:
+            m = re.search(rf'"{re.escape(key)}"\s*:\s*([-0-9.]+)', t)
+            if m:
+                try:
+                    return float(m.group(1))
+                except ValueError:
+                    continue
         return None
 
-    st = grab_str("student_text")
-    ma = grab_num("marks_awarded")
-    cp = grab_num("confidence_percent")
-    gp = grab_str("good_points")
-    imp = grab_str("improvements")
-    fr = grab_str("final_review")
+    st = grab_str("studentText", "student_text")
+    ma = grab_num("marksAwarded", "marks_awarded")
+    cp = grab_num("confidencePercent", "confidence_percent")
+    gp = grab_str("goodPoints", "good_points")
+    imp = grab_str("improvements", "improvements")
+    fr = grab_str("finalReview", "final_review")
 
     if ma is None:
         ma = 0.0
     if cp is None:
         cp = 0.0
 
-    annotations: list[dict] = []
-    for block in re.finditer(
-        r"\{[^{}]*page_index[^{}]*\}", t, re.DOTALL
-    ):
+    annotations: list[dict[str, Any]] = []
+    for block in re.finditer(r"\{[^{}]*(?:pageIndex|page_index)[^{}]*\}", t, re.DOTALL):
         try:
             obj = json.loads(block.group(0))
-            if isinstance(obj, dict) and "page_index" in obj:
+            if isinstance(obj, dict) and (
+                "pageIndex" in obj or "page_index" in obj
+            ):
                 annotations.append(obj)
         except json.JSONDecodeError:
             continue
@@ -429,26 +598,37 @@ def _parse_combined_json(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         if isinstance(raw, dict):
+            fr = str(_first_key(raw, "final_review", "finalReview", default=""))
+            oi = str(
+                _first_key(
+                    raw, "overall_improvements", "overallImprovements", default=""
+                )
+            )
+            ot = str(
+                _first_key(raw, "one_thing_to_write", "oneThingToWrite", default="")
+            )
             return {
-                "final_review": str(raw.get("final_review", "")),
-                "overall_improvements": str(raw.get("overall_improvements", "")),
-                "one_thing_to_write": str(raw.get("one_thing_to_write", "")),
+                "final_review": fr,
+                "overall_improvements": oi,
+                "one_thing_to_write": ot,
             }
     t = _strip_json_fence(text)
 
-    def grab(key: str) -> str:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:[^"\\]|\\.)*)"', t, re.DOTALL)
-        if not m:
-            return ""
-        s = m.group(1)
-        try:
-            return json.loads(f'"{s}"')
-        except json.JSONDecodeError:
-            return s.replace("\\n", "\n").replace("\\t", "\t")
+    def grab(*keys: str) -> str:
+        for key in keys:
+            m = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:[^"\\]|\\.)*)"', t, re.DOTALL)
+            if not m:
+                continue
+            s = m.group(1)
+            try:
+                return json.loads(f'"{s}"')
+            except json.JSONDecodeError:
+                return s.replace("\\n", "\n").replace("\\t", "\t")
+        return ""
 
-    fr = grab("final_review")
-    oi = grab("overall_improvements")
-    ot = grab("one_thing_to_write")
+    fr = grab("final_review", "finalReview")
+    oi = grab("overall_improvements", "overallImprovements")
+    ot = grab("one_thing_to_write", "oneThingToWrite")
     if fr or oi or ot:
         return {
             "final_review": fr,
@@ -477,7 +657,8 @@ def _call_gemini_analysis(
             text = getattr(response, "text", None) or ""
             if not text:
                 raise RuntimeError("Gemini returned no text")
-            return _parse_analysis_json(text, total_marks, page_count)
+            parsed = _parse_analysis_json(text, total_marks, page_count)
+            return parsed
         except Exception as e:
             last_err = e
             log.warning("Analysis attempt %s failed: %s", attempt, e)
@@ -487,9 +668,7 @@ def _call_gemini_analysis(
     raise last_err
 
 
-def _call_gemini_combined(
-    client: genai.Client, contents: list[Any]
-) -> dict[str, Any]:
+def _call_gemini_combined(client: genai.Client, contents: list[Any]) -> dict[str, Any]:
     last_err: Exception | None = None
     for attempt in range(1, 4):
         try:
@@ -502,7 +681,24 @@ def _call_gemini_combined(
             text = getattr(response, "text", None) or ""
             if not text:
                 raise RuntimeError("Gemini returned no text")
-            return _parse_combined_json(text)
+            parsed = _parse_combined_json(text)
+            overall_review = str(
+                _first_key(parsed, "final_review", "finalReview", default="")
+            ) or str(_first_key(parsed, "overall_review", "overallReview", default=""))
+            out = {
+                "overall_improvements": str(
+                    _first_key(
+                        parsed, "overall_improvements", "overallImprovements", default=""
+                    )
+                ),
+                "one_thing_to_write": str(
+                    _first_key(
+                        parsed, "one_thing_to_write", "oneThingToWrite", default=""
+                    )
+                ),
+                "overall_review": overall_review,
+            }
+            return out
         except Exception as e:
             last_err = e
             log.warning("Combined review attempt %s failed: %s", attempt, e)
@@ -512,7 +708,7 @@ def _call_gemini_combined(
     raise last_err
 
 
-def _call_gemini_intro(client: genai.Client, contents: list[Any]) -> str:
+def _call_gemini_intro_plain(client: genai.Client, contents: list[Any]) -> str:
     last_err: Exception | None = None
     for attempt in range(1, 4):
         try:
@@ -521,43 +717,41 @@ def _call_gemini_intro(client: genai.Client, contents: list[Any]) -> str:
                 contents=contents,
                 config=CFG_INTRO,
             )
-            text = (getattr(response, "text", None) or "").strip()
-            if not text:
-                raise ValueError("Could not detect a marks table on this page")
-            return text
+            return (getattr(response, "text", None) or "").strip()
         except Exception as e:
             last_err = e
             log.warning("Intro-page attempt %s failed: %s", attempt, e)
             if attempt < 3:
                 time.sleep(0.3 * attempt)
     assert last_err is not None
-    if isinstance(last_err, ValueError):
-        raise last_err
-    raise RuntimeError(f"AI service error: {last_err}")
+    raise last_err
 
 
-def analyse_pages(
+def analyse_full_images(
     client: genai.Client,
     images: list[bytes],
     question_title: str,
     model_description: str,
     total_marks: int,
     language: str,
+    *,
+    instruction_name: str | None = None,
+    check_level: str = "Moderate",
 ) -> dict[str, Any]:
     page_count = len(images)
-    prompt = build_analyse_prompt(
-        question_title,
-        model_description,
-        total_marks,
-        language,
-        page_count=page_count,
-        mode="pages",
+    max_pi = max(0, page_count - 1)
+    prompt = build_full_analysis_prompt(
+        question_title=question_title.strip(),
+        model_description=model_description.strip(),
+        total_marks=total_marks,
+        language=language,
+        instruction_name=instruction_name,
+        check_level=check_level,
+        max_page_index=max_pi,
     )
     parts: list[Any] = [types.Part.from_text(text=prompt)]
     for img in images:
-        parts.append(
-            types.Part.from_bytes(data=img, mime_type=_image_mime(img))
-        )
+        parts.append(types.Part.from_bytes(data=img, mime_type=_image_mime(img)))
     return _call_gemini_analysis(
         client,
         parts,
@@ -575,27 +769,30 @@ def analyse_cached_ocr(
     total_marks: int,
     page_count: int,
     language: str,
+    *,
+    instruction_name: str | None = None,
+    check_level: str = "Moderate",
 ) -> dict[str, Any]:
-    prompt = build_analyse_prompt(
-        question_title,
-        model_description,
-        total_marks,
-        language,
+    prompt = build_cached_ocr_prompt(
+        cached_student_text=cached_student_text,
+        question_title=question_title.strip(),
+        model_description=model_description.strip(),
+        total_marks=total_marks,
+        language=language,
+        instruction_name=instruction_name,
+        check_level=check_level,
         page_count=page_count,
-        mode="cached_ocr",
     )
-    body = f"""CACHED STUDENT TEXT:
-{cached_student_text}
-
-{prompt}"""
-    parts = [types.Part.from_text(text=body)]
-    return _call_gemini_analysis(
+    parts = [types.Part.from_text(text=prompt)]
+    result = _call_gemini_analysis(
         client,
         parts,
         CFG_CACHED_OCR,
         total_marks,
         page_count,
     )
+    result["student_text"] = cached_student_text
+    return result
 
 
 def generate_combined_review(
@@ -638,8 +835,6 @@ def analyse_intro_page(client: genai.Client, image: bytes) -> dict[str, Any]:
         types.Part.from_text(text=INTRO_PAGE_PROMPT),
         types.Part.from_bytes(data=image, mime_type=_image_mime(image)),
     ]
-    raw = _call_gemini_intro(client, parts)
+    raw = _call_gemini_intro_plain(client, parts)
     cells = _parse_intro_lines(raw)
-    if not cells:
-        raise ValueError("Could not detect a marks table on this page")
     return {"cells": cells}
