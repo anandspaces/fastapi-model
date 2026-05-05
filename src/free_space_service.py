@@ -25,9 +25,10 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_ROWS = 20
 _DEFAULT_COLS = 8
-_DEFAULT_MIN_SCORE = 0.65
+_DEFAULT_MIN_SCORE = 0.70  # Bug 2 fix: raised from 0.65 to compensate for looser std multiplier
 _DEFAULT_TOP_N = 15
-_DEFAULT_DPI = 150
+# Higher DPI keeps thin rules and strokes visible → cleaner grid scores and snapping.
+_DEFAULT_DPI = 300
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +94,7 @@ def analyze_page_free_space(
     Args:
         gray:      Float32 array (h, w), values 0=black 1=white.
         rows/cols: Grid resolution.
-        min_score: Emptiness threshold (0–1). Default 0.65 suits exam booklets.
+        min_score: Emptiness threshold (0–1). Default 0.70 balances ruled-line noise vs empty cells.
         top_n:     Maximum zones returned per page.
         merge:     Whether to merge horizontally adjacent cells into wider zones.
     """
@@ -107,8 +108,8 @@ def analyze_page_free_space(
         img_h=h,
         min_score=min_score,
         top_n=top_n * 2,  # over-fetch before merge/trim
-        exclude_left_cols=1,
-        exclude_bottom_rows=1,
+        exclude_left_cols=2,   # Bug 5 fix: 1→2 cols — A4 binding strip ≈ 15-20% = 2/8 cols
+        exclude_bottom_rows=2, # Bug 5 fix: 1→2 rows — footer rules + contact line
     )
     if merge:
         zones = merge_adjacent_zones(zones, rows, cols)
@@ -162,7 +163,7 @@ def snap_items_annotations(
     items: list[dict[str, Any]],
     page_free_zones: list[list[FreeZone]],
     *,
-    min_gap_pct: float = 12.0,
+    min_gap_pct: float = 8.0,  # Bug 3 fix: 12→8, matches assign_annotations_to_free_zones default
     max_per_zone: int = 2,
     max_shift_pct: float = 35.0,
 ) -> list[dict[str, Any]]:

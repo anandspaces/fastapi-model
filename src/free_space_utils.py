@@ -2,11 +2,12 @@
 
 No I/O, no Gemini, no FastAPI. Accepts numpy arrays, returns typed data.
 
-Score formula: score = mean_brightness * (1 - min(1, std_brightness * 6))
+Score formula: score = mean_brightness * (1 - min(1, std_brightness * 3))
   - High mean  → mostly white background → good for annotation
   - Low std    → uniform (no ink variation) → good for annotation
   - Score 1.0  = pure white cell
   - Score ~0.0 = dense handwriting
+  - std multiplier 3 (not 6) avoids penalising faint ruled lines (std ≈ 0.15–0.25)
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def score_cell(cell: np.ndarray) -> float:
         return 0.0
     mean = float(np.mean(cell))
     std = float(np.std(cell))
-    std_factor = min(1.0, std * 6.0)
+    std_factor = min(1.0, std * 3.0)  # Bug 2 fix: 6→3, ruled lines (std≈0.15–0.25) no longer score zero
     return max(0.0, min(1.0, mean * (1.0 - std_factor)))
 
 
@@ -96,7 +97,7 @@ def find_free_zones(
     img_w: int,
     img_h: int,
     *,
-    min_score: float = 0.65,
+    min_score: float = 0.70,
     top_n: int = 15,
     exclude_left_cols: int = 1,
     exclude_right_cols: int = 0,
@@ -146,25 +147,27 @@ def find_free_zones(
 
 
 def merge_adjacent_zones(zones: list[FreeZone], rows: int, cols: int) -> list[FreeZone]:
-    """Merge horizontally adjacent cells in the same row into wider zones.
+    """Merge horizontally adjacent cells (same row) then vertically adjacent cells (same col).
 
-    Only merges cells that are contiguous (same row, consecutive columns).
-    Returns a new list of FreeZone objects (merged where possible).
+    Horizontal pass collapses wide blank bands; vertical pass collapses tall right-margin strips
+    (Bug 6 fix: right-margin strip was producing 15+ tiny single-row zones exhausting capacity).
     """
     if not zones:
         return []
 
+    # --- Horizontal pass: merge same-row consecutive columns ---
     by_row: dict[int, list[FreeZone]] = {}
     for z in zones:
         by_row.setdefault(z.row, []).append(z)
 
-    merged: list[FreeZone] = []
+    h_merged: list[FreeZone] = []
     for row_zones in by_row.values():
         row_zones_sorted = sorted(row_zones, key=lambda z: z.col)
         current = row_zones_sorted[0]
+        last_col = current.col  # track rightmost col in current merged zone
         for nxt in row_zones_sorted[1:]:
-            if nxt.col == current.col + 1:
-                # extend current zone to include nxt
+            if nxt.col == last_col + 1:
+                last_col = nxt.col
                 current = FreeZone(
                     x_start_percent=current.x_start_percent,
                     x_end_percent=nxt.x_end_percent,
@@ -175,12 +178,41 @@ def merge_adjacent_zones(zones: list[FreeZone], rows: int, cols: int) -> list[Fr
                     col=current.col,
                 )
             else:
-                merged.append(current)
+                h_merged.append(current)
                 current = nxt
-        merged.append(current)
+                last_col = nxt.col
+        h_merged.append(current)
 
-    merged.sort(key=lambda z: (-z.score, z.y_start_percent))
-    return merged
+    # --- Vertical pass: merge same-col consecutive rows into tall strips ---
+    by_col: dict[int, list[FreeZone]] = {}
+    for z in h_merged:
+        by_col.setdefault(z.col, []).append(z)
+
+    v_merged: list[FreeZone] = []
+    for col_zones in by_col.values():
+        col_zones_sorted = sorted(col_zones, key=lambda z: z.row)
+        current = col_zones_sorted[0]
+        last_row = current.row  # track bottommost row in current merged zone
+        for nxt in col_zones_sorted[1:]:
+            if nxt.row == last_row + 1:
+                last_row = nxt.row
+                current = FreeZone(
+                    x_start_percent=current.x_start_percent,
+                    x_end_percent=current.x_end_percent,
+                    y_start_percent=current.y_start_percent,
+                    y_end_percent=nxt.y_end_percent,
+                    score=round((current.score + nxt.score) / 2.0, 4),
+                    row=current.row,
+                    col=current.col,
+                )
+            else:
+                v_merged.append(current)
+                current = nxt
+                last_row = nxt.row
+        v_merged.append(current)
+
+    v_merged.sort(key=lambda z: (-z.score, z.y_start_percent))
+    return v_merged
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +289,7 @@ def assign_annotations_to_free_zones(
     annotations: list[dict[str, Any]],
     page_free_zones: list[list[FreeZone]],
     *,
-    min_gap_pct: float = 12.0,
+    min_gap_pct: float = 8.0,  # Bug 3 fix: 12→8 so closely-spaced annotations don't exhaust all cascades
     max_per_zone: int = 2,
     max_shift_pct: float = 35.0,
 ) -> list[dict[str, Any]]:
@@ -347,6 +379,17 @@ def assign_annotations_to_free_zones(
                         if all(abs(placed_y - p) >= min_gap_pct for p in placed_ys):
                             best_zi = zi
                             break
+
+            if best_zi is None:
+                # Cascade 3: ignore gap, pick closest zone with remaining capacity.
+                # Prevents hard failures on pages with only a few tightly-spaced zones.
+                best_dist = float("inf")
+                for zi, zone in enumerate(zones):
+                    if zone_usage[zi] < max_per_zone:
+                        dist = abs(zone.y_center() - desired_y)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_zi = zi
 
             if best_zi is not None:
                 zone = zones[best_zi]

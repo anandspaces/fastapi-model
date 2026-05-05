@@ -109,7 +109,7 @@ OUTPUT EXACTLY a JSON array of objects (one per question evaluated). You MUST ou
     "marking_y_position_percent": 45.0,
     "annotations": [
       {{
-        "page_index": 1,
+        "page_index": 0,
         "y_position_percent": 50.0,
         "x_start_percent": 20.0,
         "x_end_percent": 80.0,
@@ -141,7 +141,7 @@ Across pages: distribute so the **first page with significant ink** tends to car
 
 Per page density: roughly **2–4** annotations on a page that carries dense handwriting; thinner pages proportionally fewer. Never exceed what vertical spacing allows below.
 
-Technical: ``page_index`` must lie between ``start_page`` and ``end_page``. Use the student's language (English or Hindi) for every ``comment`` — formal, succinct, mains-appropriate wording.
+Technical: ``page_index`` MUST be **0-based** page index matching the PDF raster (first page ``0``, second ``1``). It must lie between ``start_page - 1`` and ``end_page - 1`` when those are 1-based page numbers from OCR. Use the student's language (English or Hindi) for every ``comment`` — formal, succinct, mains-appropriate wording.
 - For genuinely strong, non-generic merits only, set "is_positive": true (sparse use).
 - For sharpening, omission, misconception, shallow example, weak conclusion, missing stakeholder/dimension — set "is_positive": false and give one actionable examiner line (not moralising fluff).
 
@@ -285,6 +285,118 @@ def student_items_for_grading(
     return [it for it in student_items if item_is_attempted_for_grading(it)]
 
 
+def _normalize_annotation_page_index(raw: Any, item: dict[str, Any]) -> int:
+    """Map evaluator ``page_index`` to 0-based index for ``page_free_zones[page_idx]``.
+
+    Gemini may emit physical (1-based) page numbers or 0-based raster indices. For answers that
+    span multiple sheets, overlaps (e.g. ``p`` valid as both) follow the evaluator prompt's
+    0-based convention; single-sheet rows still remap ``page_index === start_page`` from 1-based.
+    """
+    try:
+        p = int(raw)
+    except (TypeError, ValueError):
+        p = 0
+    sp, ep = item.get("start_page"), item.get("end_page")
+    if sp is not None and ep is not None:
+        try:
+            sp_i, ep_i = int(sp), int(ep)
+        except (TypeError, ValueError):
+            pass
+        else:
+            zb_lo, zb_hi = sp_i - 1, ep_i - 1
+            valid_zb = zb_lo <= p <= zb_hi
+            valid_ob = sp_i <= p <= ep_i
+            if valid_zb and valid_ob:
+                # Multi-page spans: evaluation prompt uses 0-based page_index; trust zb when both
+                # conventions fit the same integer (e.g. p=1 → second sheet, index 1).
+                if sp_i < ep_i:
+                    return p
+                mp = item.get("marking_page")
+                if mp is not None:
+                    try:
+                        m = int(mp)
+                    except (TypeError, ValueError):
+                        m = None
+                    else:
+                        if p == m:
+                            return m - 1
+                        if p == m - 1:
+                            return p
+                if p == sp_i:
+                    return p - 1
+                return p
+            if valid_zb:
+                return p
+            if valid_ob:
+                return p - 1
+    mp = item.get("marking_page")
+    if mp is not None:
+        try:
+            m = int(mp)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if p == m:
+                return m - 1
+            if p == m - 1:
+                return p
+    return p
+
+
+def _reseed_annotations_from_ocr_coords(item: dict[str, Any]) -> None:
+    """Seed annotation placement from structure-pass OCR so the snapper starts near truth.
+
+    - Normalizes ``page_index`` to 0-based (fixes 1-based model slips).
+    - On the marking page, seeds Y from ``marking_y_position_percent`` with ±spread so multiple
+      annotations don't share one identical snap target.
+    - Seeds horizontal band from ``marking_x_position_percent`` (narrow band; snap assigns zone X).
+    """
+    anns = item.get("annotations")
+    if not isinstance(anns, list) or not anns:
+        return
+
+    for ann in anns:
+        if isinstance(ann, dict):
+            ann["page_index"] = _normalize_annotation_page_index(ann.get("page_index"), item)
+
+    m_page = item.get("marking_page")
+    m_y = item.get("marking_y_position_percent")
+    m_x = item.get("marking_x_position_percent")
+    if m_page is None or m_y is None:
+        return
+    try:
+        mp = int(m_page)
+        my = float(m_y)
+        mx = float(m_x) if m_x is not None else 50.0
+    except (TypeError, ValueError):
+        return
+
+    target_pi = mp - 1
+    half_w = 15.0
+    x0 = max(5.0, min(100.0 - half_w * 2, mx - half_w))
+    x1 = min(95.0, max(x0 + 5.0, mx + half_w))
+
+    on_marking = [i for i, a in enumerate(anns) if isinstance(a, dict) and int(a.get("page_index", -1)) == target_pi]
+    if not on_marking:
+        return
+
+    step = 16.0
+    ordered = sorted(
+        on_marking,
+        key=lambda i: float(anns[i].get("y_position_percent") or my),
+    )
+    n = len(ordered)
+    mid = (n - 1) / 2.0
+
+    for rank, i in enumerate(ordered):
+        offset = (rank - mid) * step
+        ny = max(6.0, min(94.0, my + offset))
+        a = anns[i]
+        a["y_position_percent"] = round(ny, 2)
+        a["x_start_percent"] = round(x0, 2)
+        a["x_end_percent"] = round(x1, 2)
+
+
 def merge_evaluations_into_items(
     items: list[dict[str, Any]],
     evaluations: list[dict[str, Any]],
@@ -312,6 +424,7 @@ def merge_evaluations_into_items(
             for k in _GRADING_KEYS:
                 if k in ev:
                     out[k] = ev[k]
+            _reseed_annotations_from_ocr_coords(out)
         merged.append(out)
 
     for qid, ev in by_qid.items():

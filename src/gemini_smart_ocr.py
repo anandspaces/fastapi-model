@@ -856,8 +856,8 @@ def smart_ocr_extract_student_answers(
 
     run_classify = _env_bool("SMART_OCR_CLASSIFY", True)
 
-    # Smart OCR needs better handwritten fidelity on long copies; enforce a higher floor.
-    dpi = max(220, copy_ocr_raster_dpi())
+    # Layout / marking coords need sharper raster than coarse copy previews; enforce a high floor.
+    dpi = max(300, copy_ocr_raster_dpi())
     png_pages = rasterize_pdf_to_png_pages(pdf_path, dpi=dpi, request_id=request_id)
     max_workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
 
