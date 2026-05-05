@@ -10,10 +10,9 @@ Move Gemini calls to backend. Flutter should call backend endpoints and receive 
 
 `https://<your-domain>` — paths below are rooted at the API host (e.g. local `http://127.0.0.1:8000`). Authoritative URLs: **`AI_ANALYSE_API_INTEGRATION.md`**.
 
-All endpoints:
-- `Content-Type: application/json`
+- **`POST /analyse/full`** is **`multipart/form-data` only** — form fields `modelId`, `questionId`, and repeated **`pageImages`** file parts (no JSON body, no base64). Other routes below use **`application/json`** unless noted.
 - `Authorization: Bearer <token>` (recommended)
-- Return JSON with stable schema
+- Responses use JSON with stable schema
 
 ---
 
@@ -54,23 +53,12 @@ Success payloads under `data` use **snake_case** keys (e.g. `student_text`, `mar
 
 ### `POST /analyse/full`
 
-### Request
+### Request (`multipart/form-data`)
 
-```json
-{
-  "pageImagesBase64": ["<base64-jpeg-1>", "<base64-jpeg-2>"],
-  "questionTitle": "Q3. ...",
-  "instructionName": "optional extra instructions",
-  "modelDescription": "teacher marking scheme",
-  "totalMarks": 8,
-  "language": "en",
-  "checkLevel": "Moderate"
-}
-```
+Form fields: **`modelId`**, **`questionId`**, optional **`checkLevel`**.  
+Repeated file field **`pageImages`** — one image per answer page (order preserved).
 
-Fields:
-- `language`: `"en"` or `"hi"`
-- `checkLevel`: `"Moderate"` or `"Hard"` (case-insensitive supported)
+Question title, marking scheme (`desc`), total marks, language, and examiner **`instruction_name`** come from the stored model (`GET /models/{modelId}`). See **`AI_ANALYSE_API_INTEGRATION.md`**.
 
 ### Response (`data` fields, snake_case)
 
@@ -82,7 +70,9 @@ Fields:
   "good_points": "• ...",
   "improvements": "• ...",
   "final_review": "...",
-  "annotations": []
+  "annotations": [],
+  "model_id": "...",
+  "question_id": "..."
 }
 ```
 
@@ -90,7 +80,7 @@ Fields:
 
 - Clamp marks: `0 <= marks_awarded <= totalMarks`
 - Clamp confidence: `0 <= confidence_percent <= 100`
-- Clamp each annotation `page_index` to `[0, pageImagesBase64.length - 1]`
+- Clamp each annotation `page_index` to `[0, number_of_uploaded_page_images - 1]`
 - Retry model call up to 3 times if JSON parse fails
 - Output annotations should be positive-only in current behavior:
   - `isPositive: true`
@@ -102,20 +92,18 @@ Fields:
 
 ### `POST /analyse/cached-ocr`
 
-### Request
+### Request (JSON)
 
 ```json
 {
+  "modelId": "<uuid>",
+  "questionId": "q-eng-001",
   "cachedStudentText": "...",
-  "questionTitle": "Q3. ...",
-  "instructionName": "optional extra instructions",
-  "modelDescription": "teacher marking scheme",
-  "totalMarks": 8,
-  "pageCount": 2,
-  "language": "en",
   "checkLevel": "Moderate"
 }
 ```
+
+Metadata, **`instruction_name`** (for prompts), and page-count hint are resolved server-side from the stored question.
 
 ### Response
 
@@ -132,16 +120,15 @@ Same as full analysis response object.
 
 ### `POST /analyse/combined-review`
 
-### Request
+### Request (JSON)
 
 ```json
 {
+  "modelId": "<uuid>",
   "questionResults": [
     {
-      "questionNo": "1",
-      "title": "Q1 ...",
+      "questionId": "q-eng-001",
       "marksAwarded": 3.5,
-      "marksTotal": 8,
       "improvements": "• ...",
       "goodPoints": "• ...",
       "finalReview": "..."
@@ -149,6 +136,8 @@ Same as full analysis response object.
   ]
 }
 ```
+
+`questionNo`, `title`, and `marksTotal` are merged server-side from the database.
 
 ### Response (`data`, snake_case)
 

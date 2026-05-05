@@ -74,7 +74,6 @@ from src.schemas import (
     CombinedReviewRequest,
     ExpandModelAnswerRequest,
     BulkQuestionPageMarksPayload,
-    FullAnalysisRequest,
     IntroPageJsonRequest,
     QuestionPayload,
     ReorderQuestionsPayload,
@@ -840,24 +839,152 @@ def _decode_page_images_base64(items: list[str]) -> list[bytes]:
     return blobs
 
 
+def _resolve_question_grading_context(
+    owner_user_id: str,
+    model_id: str,
+    question_id: str,
+    check_level_raw: str,
+) -> tuple[str, str, int, str, str | None, str, int] | JSONResponse:
+    """Returns title, desc, total_marks, lang, instruction_name from DB, check_canon, page_count."""
+    model = get_answer_model(model_id, owner_user_id)
+    if not model:
+        return JSONResponse(_err("Model not found."), status_code=400)
+    lang_raw = (model.get("lang") or "").strip().lower()
+    if not _valid_lang(lang_raw):
+        return JSONResponse(
+            _err("Model language must be en or hi for analysis."), status_code=400
+        )
+    questions = model.get("questions")
+    if not isinstance(questions, list):
+        return JSONResponse(_err("Model has no questions."), status_code=400)
+    q: dict | None = None
+    for item in questions:
+        if isinstance(item, dict) and item.get("id") == question_id:
+            q = item
+            break
+    if not q:
+        return JSONResponse(_err("Question not found for this model."), status_code=400)
+    title = (q.get("title") or "").strip()
+    desc = (q.get("desc") or "").strip()
+    if not title or not desc:
+        return JSONResponse(
+            _err("Stored question is missing title or desc."), status_code=400
+        )
+    marks_raw = q.get("marks")
+    try:
+        total_marks = int(marks_raw) if marks_raw is not None else 0
+    except (TypeError, ValueError):
+        total_marks = 0
+    if total_marks < 1:
+        return JSONResponse(
+            _err("Stored question marks must be at least 1 for analysis."),
+            status_code=400,
+        )
+    check_canon = normalize_evaluation_check_level(check_level_raw)
+    if not check_canon:
+        return JSONResponse(
+            _err('checkLevel must be "Moderate" or "Hard" (field checkLevel).'),
+            status_code=400,
+        )
+    ins = q.get("instruction_name")
+    instr = str(ins).strip() if ins is not None and str(ins).strip() else None
+    pn = q.get("pageNum")
+    try:
+        page_count = int(pn) if pn is not None else 1
+    except (TypeError, ValueError):
+        page_count = 1
+    page_count = max(1, page_count)
+    return title, desc, total_marks, lang_raw, instr, check_canon, page_count
+
+
+async def _read_page_image_blobs(page_images: list[UploadFile]) -> list[bytes]:
+    blobs: list[bytes] = []
+    for i, uf in enumerate(page_images):
+        raw = await uf.read()
+        if not raw:
+            raise ValueError(f"Empty file at pageImages[{i}]")
+        blobs.append(raw)
+    return blobs
+
+
+def _combined_rows_for_gemini(
+    owner_user_id: str, payload: CombinedReviewRequest
+) -> tuple[list[dict[str, object]], JSONResponse | None]:
+    model = get_answer_model(payload.model_id, owner_user_id)
+    if not model:
+        return [], JSONResponse(_err("Model not found."), status_code=400)
+    questions = model.get("questions")
+    if not isinstance(questions, list):
+        return [], JSONResponse(_err("Model has no questions."), status_code=400)
+    by_id = {
+        str(q["id"]): q
+        for q in questions
+        if isinstance(q, dict) and q.get("id")
+    }
+    rows: list[dict[str, object]] = []
+    for item in payload.question_results:
+        q = by_id.get(item.question_id)
+        if not q:
+            return [], JSONResponse(
+                _err(f"Question not found for this model: {item.question_id}"),
+                status_code=400,
+            )
+        try:
+            marks_total = int(q.get("marks") or 0)
+        except (TypeError, ValueError):
+            marks_total = 0
+        rows.append(
+            {
+                "questionNo": q.get("questionNo") or "",
+                "title": q.get("title") or "",
+                "marksAwarded": item.marks_awarded,
+                "marksTotal": marks_total,
+                "goodPoints": item.good_points,
+                "improvements": item.improvements,
+                "finalReview": item.final_review,
+            }
+        )
+    return rows, None
+
+
 @app.post("/analyse/full")
 async def post_api_v1_analyse_full(
-    request: Request, payload: FullAnalysisRequest
+    request: Request,
+    model_id: str = Form(..., alias="modelId"),
+    question_id: str = Form(..., alias="questionId"),
+    check_level: str = Form("Moderate", alias="checkLevel"),
+    page_images: list[UploadFile] = File(..., alias="pageImages"),
 ) -> JSONResponse:
-    """Full-page-image analysis (Flutter ``GeminiService.analyse`` replacement)."""
+    """Full-page-image analysis.
+
+    **Content-Type: multipart/form-data only.** Form fields ``modelId``, ``questionId``;
+    repeated file field ``pageImages`` (one binary image per page). No JSON body and no
+    base64 image arrays—use file parts only.
+    """
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    lang = payload.language.strip().lower()
-    if not _valid_lang(lang):
-        return JSONResponse(_err("language must be en or hi"))
-    check_canon = normalize_evaluation_check_level(payload.check_level)
-    if not check_canon:
-        return JSONResponse(
-            _err('checkLevel must be "Moderate" or "Hard" (JSON field checkLevel).')
-        )
+    if not page_images:
+        return JSONResponse(_err("At least one pageImages file is required."), status_code=400)
+    resolved = _resolve_question_grading_context(
+        str(user["id"]),
+        model_id.strip(),
+        question_id.strip(),
+        check_level,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    (
+        question_title,
+        model_description,
+        total_marks,
+        lang,
+        instr_eff,
+        check_canon,
+        _page_count,
+    ) = resolved
     try:
-        blobs = _decode_page_images_base64(payload.page_images_base64)
+        blobs = await _read_page_image_blobs(page_images)
     except ValueError as e:
         return JSONResponse(_err(str(e)), status_code=400)
     try:
@@ -870,35 +997,47 @@ async def post_api_v1_analyse_full(
             analyse_full_images,
             client,
             blobs,
-            payload.question_title.strip(),
-            payload.model_description.strip(),
-            payload.total_marks,
+            question_title,
+            model_description,
+            total_marks,
             lang,
-            instruction_name=payload.instruction_name,
+            instruction_name=instr_eff,
             check_level=check_canon,
         )
     except Exception as e:
         log.exception("analyse/full failed")
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
-    return JSONResponse(_ok("Analysis complete.", **result))
+    out = dict(result)
+    out["model_id"] = model_id.strip()
+    out["question_id"] = question_id.strip()
+    return JSONResponse(_ok("Analysis complete.", **out))
 
 
 @app.post("/analyse/cached-ocr")
 async def post_api_v1_analyse_cached_ocr(
     request: Request, payload: CachedOcrRequest
 ) -> JSONResponse:
-    """Cached OCR re-analysis (Flutter ``GeminiService._analyseFromCachedText`` replacement)."""
+    """Cached OCR re-analysis — JSON ``modelId``, ``questionId``, ``cachedStudentText``."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    lang = payload.language.strip().lower()
-    if not _valid_lang(lang):
-        return JSONResponse(_err("language must be en or hi"))
-    check_canon = normalize_evaluation_check_level(payload.check_level)
-    if not check_canon:
-        return JSONResponse(
-            _err('checkLevel must be "Moderate" or "Hard" (JSON field checkLevel).')
-        )
+    resolved = _resolve_question_grading_context(
+        str(user["id"]),
+        payload.model_id.strip(),
+        payload.question_id.strip(),
+        payload.check_level,
+    )
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    (
+        question_title,
+        model_description,
+        total_marks,
+        lang,
+        instr_eff,
+        check_canon,
+        page_count,
+    ) = resolved
     try:
         api_key = load_api_key()
     except ValueError as e:
@@ -909,33 +1048,38 @@ async def post_api_v1_analyse_cached_ocr(
             analyse_cached_ocr,
             client,
             payload.cached_student_text,
-            payload.question_title.strip(),
-            payload.model_description.strip(),
-            payload.total_marks,
-            payload.page_count,
+            question_title,
+            model_description,
+            total_marks,
+            page_count,
             lang,
-            instruction_name=payload.instruction_name,
+            instruction_name=instr_eff,
             check_level=check_canon,
         )
     except Exception as e:
         log.exception("/analyse/cached-ocr failed")
         return JSONResponse(_err(f"AI service error: {e}"), status_code=500)
-    return JSONResponse(_ok("Analysis complete.", **result))
+    out = dict(result)
+    out["model_id"] = payload.model_id.strip()
+    out["question_id"] = payload.question_id.strip()
+    return JSONResponse(_ok("Analysis complete.", **out))
 
 
 @app.post("/analyse/combined-review")
 async def post_api_v1_combined_review(
     request: Request, payload: CombinedReviewRequest
 ) -> JSONResponse:
-    """End-of-paper combined review (Flutter combined key review replacement)."""
+    """End-of-paper combined review — compact ``questionResults`` merged with stored questions."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
+    rows, err = _combined_rows_for_gemini(str(user["id"]), payload)
+    if err is not None:
+        return err
     try:
         api_key = load_api_key()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
-    rows = [q.model_dump(by_alias=True) for q in payload.question_results]
     try:
         client = genai.Client(api_key=api_key)
         result = await asyncio.to_thread(generate_combined_review, client, rows)
@@ -972,19 +1116,45 @@ async def post_api_v1_analyse_intro_page(
     return JSONResponse(_ok("Intro page analysed.", **result))
 
 
+def _resolve_copy_ocr_language(
+    language: str,
+    model_id: str,
+    owner_user_id: str,
+) -> tuple[str, JSONResponse | None]:
+    """Explicit ``language`` wins; else ``modelId`` loads model ``lang``; else ``en``."""
+    lang_s = (language or "").strip().lower()
+    if lang_s and _valid_lang(lang_s):
+        return lang_s, None
+    mid = (model_id or "").strip()
+    if mid:
+        model = get_answer_model(mid, owner_user_id)
+        if not model:
+            return "", JSONResponse(_err("Model not found."), status_code=400)
+        lm = (model.get("lang") or "").strip().lower()
+        if _valid_lang(lm):
+            return lm, None
+        return "", JSONResponse(
+            _err("Model language must be en or hi for OCR."), status_code=400
+        )
+    if not lang_s:
+        return "en", None
+    return "", JSONResponse(_err("language must be en or hi"))
+
+
 @app.post("/analyse/copy-ocr")
 async def post_analyse_copy_ocr(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Form("en"),
+    language: str = Form(""),
+    model_id: str = Form("", alias="modelId"),
 ) -> JSONResponse:
     """Extracts OCR text from a PDF copy using direct PDF processing."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    lang = language.strip().lower()
-    if not _valid_lang(lang):
-        return JSONResponse(_err("language must be en or hi"))
+    lang, lang_err = _resolve_copy_ocr_language(language, model_id, str(user["id"]))
+    if lang_err is not None:
+        return lang_err
     if not _is_pdf(file.filename, file.content_type):
         return JSONResponse(_err("file must be a PDF."))
     raw = await file.read()
@@ -1057,15 +1227,16 @@ async def post_analyse_copy_ocr(
 async def post_analyse_copy_ocr_rasterization(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Form("en"),
+    language: str = Form(""),
+    model_id: str = Form("", alias="modelId"),
 ) -> JSONResponse:
     """Extracts OCR text from a PDF after rasterizing pages to images."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
-    lang = language.strip().lower()
-    if not _valid_lang(lang):
-        return JSONResponse(_err("language must be en or hi"))
+    lang, lang_err = _resolve_copy_ocr_language(language, model_id, str(user["id"]))
+    if lang_err is not None:
+        return lang_err
     if not _is_pdf(file.filename, file.content_type):
         return JSONResponse(_err("file must be a PDF."))
     raw = await file.read()

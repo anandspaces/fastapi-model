@@ -221,6 +221,22 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
     }
 
 
+def get_question_for_owner(
+    model_id: str, question_id: str, owner_user_id: str
+) -> tuple[dict | None, str | None]:
+    """Return ``(question_dict, None)`` or ``(None, error_message)``."""
+    model = get_answer_model(model_id, owner_user_id)
+    if not model:
+        return None, "Model not found."
+    questions = model.get("questions")
+    if not isinstance(questions, list):
+        return None, "Model has no questions."
+    for q in questions:
+        if isinstance(q, dict) and q.get("id") == question_id:
+            return q, None
+    return None, "Question not found for this model."
+
+
 def list_registered_models(owner_user_id: str) -> list[dict]:
     """Every id from POST /models/key (key_uploads), with title/lang.
 

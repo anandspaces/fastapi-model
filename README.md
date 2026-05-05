@@ -76,11 +76,11 @@ Data: `data/` at repo root (DB + uploads).
 
 All require `Authorization: Bearer <accessToken>`. Success uses `{ "status": 1, "message": "...", "data": { ... } }` (same as other routes).
 
-- `POST /analyse/full` — JSON request (camelCase field names accepted): `pageImagesBase64`, `questionTitle`, optional `instructionName`, `modelDescription`, `totalMarks`, `language`, `checkLevel` (`Moderate` \| `Hard`). Success **`data`** uses **snake_case** keys (`student_text`, `marks_awarded`, `annotations[].page_index`, …). See **`AI_ANALYSE_API_INTEGRATION.md`**.
-- `POST /analyse/cached-ocr` — JSON request as above; **`data`** snake_case (see **`AI_ANALYSE_API_INTEGRATION.md`**).
-- `POST /analyse/combined-review` — JSON: `questionResults` (camelCase request keys); **`data`** snake_case (`overall_review`, `overall_improvements`, `one_thing_to_write`).
+- `POST /analyse/full` — **`multipart/form-data` only** (not JSON): `modelId`, `questionId`, repeated `pageImages` file parts; optional `checkLevel`. Scheme/marks/language/instructions from DB. See **`AI_ANALYSE_API_INTEGRATION.md`**.
+- `POST /analyse/cached-ocr` — **JSON**: `modelId`, `questionId`, `cachedStudentText`; optional `checkLevel`. **`data`** snake_case.
+- `POST /analyse/combined-review` — **JSON**: `modelId` + compact `questionResults` (`questionId`, `marksAwarded`, `goodPoints`, `improvements`, `finalReview`); server fills titles/marks from DB.
 - `POST /analyse/intro-page` — JSON: `pageImageBase64`; **`data.cells`** entries use `question_no`, `marks_text`, `x_percent`, `y_percent`.
-- `POST /analyse/copy-ocr` — multipart: `file` (PDF), optional `language` (`en` \| `hi`); whole-PDF essay copy OCR (`text` + `pageCount`; limits `COPY_OCR_MAX_BYTES` / `COPY_OCR_MAX_PAGES`)
+- `POST /analyse/copy-ocr` — multipart: `file` (PDF), optional `language`, optional `modelId` (default language from model when language omitted)
 - `POST /analyse/copy-ocr-rasterization` — same inputs; rasterizes each page (PyMuPDF) and OCRs pages in parallel (up to `COPY_OCR_PARALLEL_WORKERS`, default 5); `data` adds `rasterDpi`, `parallelWorkers`
 
 Responses: `{ "status": 1 \| 0 \| -1, "message": ..., "data": { ... } }` (errors from validation use `status: 0`; auth failures `status: -1`).

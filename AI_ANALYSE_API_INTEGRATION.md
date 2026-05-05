@@ -1,253 +1,398 @@
-# AI Analyse APIs — Integration Guide
+# Analyse module — API integration
 
-HTTP reference for the Gemini-backed **grading**, **cached re-analysis**, **combined paper review**, and **intro-page marks table** flows. These replace direct Flutter `GeminiService` calls.
+All routes require **`Authorization: Bearer <accessToken>`** unless noted. Success envelope:
 
-## Authentication
-
-All endpoints below require:
-
-```http
-Authorization: Bearer <accessToken>
+```json
+{ "status": 1, "message": "…", "data": { } }
 ```
 
-Obtain `<accessToken>` from `POST /auth/login` or `POST /auth/signup`. Response shape:
+Errors: **`status`** `0` (validation / business / AI) or **`-1`** (auth). AI failures often use HTTP **500** with `status: 0` and `message` starting with `AI service error:`.
+
+**Base URL (local):** `http://127.0.0.1:8000`
+
+---
+
+## Route summary
+
+| Method | Path | Content-Type | Purpose |
+|--------|------|----------------|---------|
+| POST | `/analyse/full` | `multipart/form-data` | Grade handwritten pages (images + model/question ids). |
+| POST | `/analyse/cached-ocr` | `application/json` | Re-grade using cached OCR text + ids. |
+| POST | `/analyse/combined-review` | `application/json` | End-of-paper combined comment from compact per-question results + ids. |
+| POST | `/analyse/intro-page` | `application/json` | Extract intro/cover marks table from one image. |
+| POST | `/analyse/copy-ocr` | `multipart/form-data` | Essay PDF → full-text OCR. |
+| POST | `/analyse/copy-ocr-rasterization` | `multipart/form-data` | PDF → per-page raster OCR (parallel). |
+| POST | `/analyse/smart-ocr` | `multipart/form-data` | Booklet PDF → structured answers; optional grading with `modelId`. |
+| POST | `/analyse/free-space` | `multipart/form-data` | Detect empty zones for annotations. |
+| POST | `/analyse/snap-annotations` | `application/json` | Snap annotations to free-space zones. |
+
+---
+
+## 1. `POST /analyse/full`
+
+### Form data only (not JSON)
+
+This endpoint accepts **`multipart/form-data` only**. Do **not** send `application/json`, `pageImagesBase64`, or any base64-encoded bodies—pages must be sent as **real image bytes** in repeated **`pageImages`** file parts (JPEG/PNG typical). That avoids base64 size overhead and matches mobile/web camera uploads.
+
+Marking scheme, marks, and language are loaded from the stored answer model (`GET /models/{model_id}`) for the authenticated user.
+
+Sending **`Content-Type: application/json`** to this URL will not parse as this handler expects (`422` / unparsed body).
+
+### Request parts (`multipart/form-data`)
+
+| Part | Name | Required | Description |
+|------|------|----------|-------------|
+| Field | `modelId` | Yes | Answer model id (same as key id). |
+| Field | `questionId` | Yes | Question id from `data.questions[].id`. |
+| Field | `checkLevel` | No | `Moderate` or `Hard` (default `Moderate`). |
+| File | `pageImages` | Yes (≥ 1) | One JPEG/PNG per page, order = page order. |
+
+### Success response (`data`, snake_case)
 
 ```json
 {
   "status": 1,
-  "message": "Login successful.",
+  "message": "Analysis complete.",
   "data": {
-    "accessToken": "<jwt>",
-    "tokenType": "Bearer",
-    "expiresIn": 3600,
-    "username": "..."
+    "student_text": "…",
+    "marks_awarded": 5.0,
+    "confidence_percent": 78.5,
+    "good_points": "…",
+    "improvements": "…",
+    "final_review": "…",
+    "annotations": [
+      {
+        "page_index": 0,
+        "y_position_percent": 25.0,
+        "x_start_percent": 10.0,
+        "x_end_percent": 50.0,
+        "comment": "…",
+        "is_positive": true,
+        "line_style": "straight"
+      }
+    ],
+    "model_id": "<modelId>",
+    "question_id": "<questionId>"
   }
 }
 ```
 
-| Situation | HTTP status | Body |
-|-----------|--------------|------|
-| Missing / invalid Bearer token | `401` | `"status": -1`, `"message": "..."` |
-| Validation / business rule | Usually `200` | `"status": 0`, `"message": "..."` |
-| AI or unexpected server failure | `500` | `"status": 0`, `"message": "AI service error: ..."` |
+### Server-derived fields
 
-Pydantic may return **`422 Unprocessable Entity`** if required JSON fields are missing or fail constraints (e.g. empty arrays).
+- **`questionTitle` / scheme / `totalMarks`** from stored question (`title`, `desc`, `marks`); **`marks`** must be ≥ 1.
+- Extra examiner instructions for Gemini come only from the stored question’s **`instruction_name`** (no request field).
+- **`language`** from model **`lang`** (`en` or `hi`).
+- **`page_count`** for clamping annotations comes from uploaded image count.
 
-## Response envelope (success)
+### Typical errors
+
+- **400** — Missing/empty `pageImages`; model/question not found; invalid `checkLevel`; stored question missing title/desc or marks &lt; 1; model `lang` not `en`/`hi`.
+
+### cURL example
+
+```bash
+curl -s -X POST "$BASE/analyse/full" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "modelId=$MID" \
+  -F "questionId=$QID" \
+  -F "checkLevel=Moderate" \
+  -F "pageImages=@page1.jpg;type=image/jpeg" \
+  -F "pageImages=@page2.jpg;type=image/jpeg"
+```
+
+---
+
+## 2. `POST /analyse/cached-ocr`
+
+### Request body (JSON)
+
+No **`instructionName`** field — examiner instructions come only from the stored question’s **`instruction_name`**.
+
+```json
+{
+  "modelId": "<uuid>",
+  "questionId": "q-eng-001",
+  "cachedStudentText": "…",
+  "checkLevel": "Moderate"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|--------|
+| `modelId` | Yes | |
+| `questionId` | Yes | |
+| `cachedStudentText` | Yes | Non-empty. |
+| `checkLevel` | No | Default `Moderate`. |
+
+### Server-derived
+
+Same title/desc/marks/language/instruction as **`/analyse/full`**. **`page_count`** = `max(1, question.pageNum)` from stored question.
+
+### Success response
+
+Same shape as **`/analyse/full`**. **`data.student_text`** is always the request **`cachedStudentText`**.
 
 ```json
 {
   "status": 1,
-  "message": "Human-readable message",
-  "data": { }
+  "message": "Analysis complete.",
+  "data": {
+    "student_text": "<same as cachedStudentText>",
+    "marks_awarded": 4.5,
+    "confidence_percent": 70.0,
+    "good_points": "…",
+    "improvements": "…",
+    "final_review": "…",
+    "annotations": [],
+    "model_id": "<modelId>",
+    "question_id": "<questionId>"
+  }
 }
 ```
 
-All **`data` keys for these four endpoints are snake_case** (e.g. `student_text`, `marks_awarded`, `overall_review`). There is **no** token-usage or billing metadata in the response.
-
-## Environment (server)
-
-| Variable | Role |
-|----------|------|
-| `GEMINI_API_KEY` | Required for any Gemini call (loaded via `load_api_key()`). |
-| `GEMINI_ANALYSE_MODEL` | Optional; model id passed to Gemini for these flows. Set explicitly in production (e.g. `gemini-2.5-flash`). See `.env.example`. |
-| `JWT_SECRET` | Required for issuing and validating Bearer tokens. |
-
 ---
 
-## 1. Full page-image analysis
+## 3. `POST /analyse/combined-review`
 
-**`POST /analyse/full`**
+### Request body (JSON)
 
-Grades handwritten answer pages sent as base64 images (JPEG/PNG). Content-Type: **`application/json`**.
-
-### Request body
-
-Clients may use **camelCase** names (Flutter-style); snake_case is also accepted.
-
-| Field | JSON name(s) | Type | Notes |
-|-------|----------------|------|--------|
-| Page images | `pageImagesBase64` | `string[]` | Required, min length 1. Each element is standard base64 (padding allowed). Decoded bytes must be non-empty. |
-| Question title | `questionTitle` | `string` | Required. |
-| Instructions | `instructionName` | `string` \| omitted | Optional extra examiner instructions. |
-| Marking scheme | `modelDescription` | `string` | Required. |
-| Total marks | `totalMarks` | `int` | Required, ≥ 1. |
-| Language | `language` | `string` | Required: `en` or `hi` (case-insensitive after trim). |
-| Strictness | `checkLevel` | `string` | Optional; default `Moderate`. Must normalize to **`Moderate`** or **`Hard`** (see errors). |
-
-### Success `data`
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `student_text` | `string` | Transcribed / synthesized student answer text. |
-| `marks_awarded` | `number` | Decimal marks (0.5 steps), capped by `totalMarks`. |
-| `confidence_percent` | `number` | 0–100. |
-| `good_points` | `string` | Bullet-style strengths. |
-| `improvements` | `string` | Bullet-style gaps. |
-| `final_review` | `string` | Short overall remark. |
-| `annotations` | `array` | See **Annotation object** below. |
-
-### Annotation object
-
-Each element:
-
-| Key | Type |
-|-----|------|
-| `page_index` | `integer` — 0-based page index in the request image list. |
-| `y_position_percent` | `number` |
-| `x_start_percent` | `number` |
-| `x_end_percent` | `number` |
-| `comment` | `string` |
-| `is_positive` | `boolean` |
-| `line_style` | `string` (e.g. `straight`) |
-
-### Typical errors
-
-- **`400`** — Invalid base64 or empty decoded bytes for an entry in `pageImagesBase64` (`Invalid base64...` / `Empty image bytes...`).
-- **`200`, `status: 0`** — `language must be en or hi`; `checkLevel must be "Moderate" or "Hard"`; missing API key message from config.
-- **`500`** — Gemini failure or JSON parse failure after retries (`AI service error: ...`).
-
-### Client timeouts
-
-Allow **60–180 seconds** depending on image count and size.
-
----
-
-## 2. Cached OCR re-analysis
-
-**`POST /analyse/cached-ocr`**
-
-Same grading logic as full analysis, but the model receives **text** instead of images. The returned **`student_text` is always overwritten** with the request’s `cachedStudentText` so clients can rely on stable OCR text. Content-Type: **`application/json`**.
-
-### Request body
-
-| Field | JSON name(s) | Type | Notes |
-|-------|----------------|------|--------|
-| Cached transcript | `cachedStudentText` | `string` | Required, non-empty. |
-| Question title | `questionTitle` | `string` | Required. |
-| Instructions | `instructionName` | optional | |
-| Marking scheme | `modelDescription` | `string` | Required. |
-| Total marks | `totalMarks` | `int` | ≥ 1. |
-| Page count | `pageCount` | `int` | ≥ 1 (used for annotation placement hints). |
-| Language | `language` | `string` | `en` or `hi`. |
-| Strictness | `checkLevel` | `string` | Same as full analysis. |
-
-### Success `data`
-
-Same shape as **`POST /analyse/full`**. Guaranteed: `data.student_text === request.cachedStudentText`.
-
----
-
-## 3. Combined end-of-paper review
-
-**`POST /analyse/combined-review`**
-
-Builds one consolidated teacher-style summary from per-question results. Content-Type: **`application/json`**.
-
-### Request body
-
-Top-level:
-
-| Field | JSON name | Type |
-|-------|-----------|------|
-| Per-question rows | `questionResults` | array (min length 1) |
-
-Each item in `questionResults`:
-
-| Field | JSON name | Type |
-|-------|-----------|------|
-| Question id / label | `questionNo` | `string` |
-| Title | `title` | `string` |
-| Marks awarded | `marksAwarded` | `number` |
-| Marks total | `marksTotal` | `integer` |
-| Good points | `goodPoints` | `string` |
-| Improvements | `improvements` | `string` |
-| Final review | `finalReview` | `string` |
-
-### Success `data`
-
-| Key | Type |
-|-----|------|
-| `overall_review` | `string` — long consolidated paragraph (maps from model `final_review` / legacy keys internally). |
-| `overall_improvements` | `string` — typically several lines. |
-| `one_thing_to_write` | `string` — single actionable tip. |
-
-### Typical errors
-
-- **`500`** — Parse failure or Gemini error (`AI service error: ...`).
-
----
-
-## 4. Intro / cover page marks table
-
-**`POST /analyse/intro-page`**
-
-Extracts handwritten marks from the **M.Obt.** column of a cover marks table. Content-Type: **`application/json`**.
-
-### Request body
-
-| Field | JSON name | Type |
-|-------|-----------|------|
-| Single page image | `pageImageBase64` | `string` — non-empty base64 (JPEG/PNG). |
-
-### Success `data`
+**Compact rows only** — `questionNo`, `title`, `marksTotal` are filled from the database.
 
 ```json
 {
-  "cells": [
+  "modelId": "<uuid>",
+  "questionResults": [
     {
-      "question_no": 1,
-      "marks_text": "4",
-      "x_percent": 73.5,
-      "y_percent": 30.2
+      "questionId": "q-eng-001",
+      "marksAwarded": 6.0,
+      "goodPoints": "• …",
+      "improvements": "• …",
+      "finalReview": "…"
     }
   ]
 }
 ```
 
-- `question_no`: use **`0`** for the Total / Grand Total row.
-- `marks_text`: empty string if the cell has no visible mark.
-- `cells` may be **`[]`** if nothing could be parsed.
+### Success response
+
+```json
+{
+  "status": 1,
+  "message": "Combined review generated.",
+  "data": {
+    "overall_review": "…",
+    "overall_improvements": "…",
+    "one_thing_to_write": "…"
+  }
+}
+```
 
 ### Typical errors
 
-- **`400`** — `Invalid pageImageBase64.` or empty decoded bytes.
+- **400** — Model not found; unknown `questionId` for that model.
 
 ---
 
-## Related endpoints (same `/analyse/` prefix)
+## 4. `POST /analyse/intro-page`
 
-These use the same auth envelope but different content types; see **`API_INTEGRATION_GUIDE.md`** section 6 for multipart PDF OCR (`/analyse/copy-ocr`, `/analyse/copy-ocr-rasterization`) and other flows.
+### Request (JSON)
 
----
-
-## Example: login + full analysis
-
-```bash
-TOKEN=$(curl -s -X POST "http://127.0.0.1:8000/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"you","password":"yourpassword"}' \
-  | jq -r '.data.accessToken')
-
-PAGE_B64=$(base64 -w0 page1.jpg)
-
-curl -s -X POST "http://127.0.0.1:8000/analyse/full" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"pageImagesBase64\":[\"$PAGE_B64\"],\"questionTitle\":\"Q3\",\"modelDescription\":\"Marking scheme...\",\"totalMarks\":8,\"language\":\"en\",\"checkLevel\":\"Moderate\"}"
+```json
+{ "pageImageBase64": "<base64-jpeg-or-png>" }
 ```
 
-## Example: intro page
+### Success response
 
-```bash
-curl -s -X POST "http://127.0.0.1:8000/analyse/intro-page" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"pageImageBase64\":\"$PAGE_B64\"}"
+```json
+{
+  "status": 1,
+  "message": "Intro page analysed.",
+  "data": {
+    "cells": [
+      {
+        "question_no": 1,
+        "marks_text": "4",
+        "x_percent": 73.5,
+        "y_percent": 30.2
+      }
+    ]
+  }
+}
+```
+
+`question_no` **`0`** = total row. `cells` may be `[]`.
+
+---
+
+## 5. `POST /analyse/copy-ocr`
+
+Whole-PDF OCR for a single-question essay PDF.
+
+### Request (multipart)
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `file` | Yes | PDF. |
+| `language` | No | `en` or `hi`. If omitted/empty, **`modelId`** may supply language from the stored model. |
+| `modelId` | No | If set and `language` not set, language defaults from model `lang`. |
+
+### Success response
+
+```json
+{
+  "status": 1,
+  "message": "OCR complete.",
+  "data": {
+    "text": "…",
+    "pageCount": 3
+  }
+}
 ```
 
 ---
 
-## Spec alignment
+## 6. `POST /analyse/copy-ocr-rasterization`
 
-Flutter-oriented field naming and prompt semantics are summarized in **`API_GUIDE.md`**. This document is the source of truth for **URLs**, **HTTP codes**, and **JSON envelopes** as implemented in `main.py` and `src/schemas.py`.
+Same as copy-OCR but rasterizes each page; limits **`COPY_OCR_MAX_BYTES`**, **`COPY_OCR_MAX_PAGES`**, **`COPY_OCR_RASTER_DPI`**, **`COPY_OCR_PARALLEL_WORKERS`**.
+
+### Request (multipart)
+
+Same as **`/analyse/copy-ocr`**: `file`, optional `language`, optional `modelId`.
+
+### Success response
+
+```json
+{
+  "status": 1,
+  "message": "OCR complete.",
+  "data": {
+    "text": "--- Page 1 ---\n…",
+    "pageCount": 2,
+    "rasterDpi": 220,
+    "parallelWorkers": 5
+  }
+}
+```
+
+Exact keys (`rasterDpi`, `parallelWorkers`, etc.) match runtime env — see [`API_INTEGRATION_GUIDE.md`](API_INTEGRATION_GUIDE.md).
+
+---
+
+## 7. `POST /analyse/smart-ocr`
+
+### Request (multipart)
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `file` | Yes | Student booklet PDF. |
+| `language` | No | Default `en`. |
+| `modelId` | No | If set, runs grading vs stored model. |
+| `snapAnnotations` | No | Default `true`. |
+| `checkLevel` | No | `Moderate` or `Hard` when grading. |
+
+### Success response (shape)
+
+```json
+{
+  "status": 1,
+  "message": "Smart OCR complete.",
+  "data": {
+    "pageCount": 10,
+    "items": [],
+    "skippedPages": [1],
+    "modelId": "<optional>",
+    "checkLevel": "Moderate"
+  }
+}
+```
+
+See OpenAPI `/docs` for full `items` structure.
+
+---
+
+## 8. `POST /analyse/free-space`
+
+### Request (multipart)
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `file` | Yes | — | PDF |
+| `rows` | No | 20 | Grid rows (4–40). |
+| `cols` | No | 8 | Grid cols (4–20). |
+| `min_score` | No | 0.65 | Emptiness threshold 0–1. |
+
+### Success response
+
+```json
+{
+  "status": 1,
+  "message": "Free space analysis complete.",
+  "data": {
+    "pageCount": 3,
+    "gridRows": 20,
+    "gridCols": 8,
+    "minScore": 0.65,
+    "pages": [
+      {
+        "pageIndex": 0,
+        "freeZones": [
+          {
+            "xPercent": 10.0,
+            "yPercent": 20.0,
+            "widthPercent": 80.0,
+            "heightPercent": 15.0,
+            "score": 0.72
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 9. `POST /analyse/snap-annotations`
+
+### Request (JSON)
+
+Body matches **`SnapAnnotationsRequest`**: `items` (from smart-ocr), `pages` (from free-space).
+
+```json
+{
+  "items": [],
+  "pages": []
+}
+```
+
+### Success response
+
+```json
+{
+  "status": 1,
+  "message": "Annotations snapped.",
+  "data": {
+    "items": [],
+    "snappedCount": 3,
+    "totalAnnotations": 5
+  }
+}
+```
+
+---
+
+## Environment
+
+| Variable | Role |
+|----------|------|
+| `GEMINI_API_KEY` | Required for Gemini routes. |
+| `GEMINI_ANALYSE_MODEL` | Optional model id for analyse flows. |
+| `JWT_SECRET` | Bearer auth. |
+| `COPY_OCR_*` | Limits for copy-OCR routes (see `.env.example`). |
+
+---
+
+## See also
+
+- **[`API_GUIDE.md`](API_GUIDE.md)** — Flutter-oriented prompt alignment (legacy naming notes).
+- **[`API_INTEGRATION_GUIDE.md`](API_INTEGRATION_GUIDE.md)** — Broader API surface.

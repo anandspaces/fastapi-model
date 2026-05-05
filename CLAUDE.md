@@ -85,7 +85,7 @@ All endpoints return:
 { "status": -1, "message": "..." } // auth/permission error
 ```
 
-For **`POST /analyse/full`**, **`/analyse/cached-ocr`**, **`/analyse/combined-review`**, and **`/analyse/intro-page`**, keys inside `data` are **snake_case** (for example `student_text`, `marks_awarded`, `overall_review`). See **`AI_ANALYSE_API_INTEGRATION.md`**.
+For **`POST /analyse/full`** (multipart), **`/analyse/cached-ocr`**, **`/analyse/combined-review`**, and **`/analyse/intro-page`**, keys inside `data` are **snake_case** (for example `student_text`, `marks_awarded`, `overall_review`). **`/analyse/full`** is **multipart/form-data only** (form + repeated **`pageImages`** file parts, not JSON/base64); scheme/marks/lang load from SQLite. See **`AI_ANALYSE_API_INTEGRATION.md`**.
 
 ### Key AI Flows
 

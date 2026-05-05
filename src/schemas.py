@@ -42,49 +42,38 @@ class BulkQuestionPageMarksPayload(BaseModel):
     intro_page: int | None = Field(default=None, ge=1)
 
 
-class FullAnalysisRequest(BaseModel):
-    """JSON body for ``POST /analyse/full`` (Flutter-aligned field names)."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    page_images_base64: list[str] = Field(min_length=1, alias="pageImagesBase64")
-    question_title: str = Field(alias="questionTitle")
-    instruction_name: str | None = Field(default=None, alias="instructionName")
-    model_description: str = Field(alias="modelDescription")
-    total_marks: int = Field(ge=1, alias="totalMarks")
-    language: str
-    check_level: str = Field(default="Moderate", alias="checkLevel")
-
-
 class CachedOcrRequest(BaseModel):
+    """JSON body for ``POST /analyse/cached-ocr`` — ids + cached text; scheme loaded from DB."""
+
     model_config = ConfigDict(populate_by_name=True)
 
+    model_id: str = Field(min_length=1, alias="modelId")
+    question_id: str = Field(min_length=1, alias="questionId")
     cached_student_text: str = Field(min_length=1, alias="cachedStudentText")
-    question_title: str = Field(alias="questionTitle")
-    instruction_name: str | None = Field(default=None, alias="instructionName")
-    model_description: str = Field(alias="modelDescription")
-    total_marks: int = Field(ge=1, alias="totalMarks")
-    page_count: int = Field(ge=1, alias="pageCount")
-    language: str
     check_level: str = Field(default="Moderate", alias="checkLevel")
 
 
-class QuestionResultItem(BaseModel):
+class CombinedReviewCompactItem(BaseModel):
+    """Per-question grading summary; ``questionNo`` / ``title`` / ``marksTotal`` filled server-side."""
+
     model_config = ConfigDict(populate_by_name=True)
 
-    question_no: str = Field(alias="questionNo")
-    title: str
+    question_id: str = Field(min_length=1, alias="questionId")
     marks_awarded: float = Field(alias="marksAwarded")
-    marks_total: int = Field(alias="marksTotal")
     good_points: str = Field(alias="goodPoints")
     improvements: str
     final_review: str = Field(alias="finalReview")
 
 
 class CombinedReviewRequest(BaseModel):
+    """JSON body for ``POST /analyse/combined-review`` — compact rows merged with stored questions."""
+
     model_config = ConfigDict(populate_by_name=True)
 
-    question_results: list[QuestionResultItem] = Field(min_length=1, alias="questionResults")
+    model_id: str = Field(min_length=1, alias="modelId")
+    question_results: list[CombinedReviewCompactItem] = Field(
+        min_length=1, alias="questionResults"
+    )
 
 
 class IntroPageJsonRequest(BaseModel):

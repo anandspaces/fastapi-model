@@ -612,50 +612,25 @@ Allow **60–180s** depending on `type` (essay responses are longer to generate)
 
 ### POST `/analyse/full`
 
-Full handwritten-page grading (Flutter-aligned JSON). Same auth envelope as other routes.
+Full handwritten-page grading: **`multipart/form-data` only** — form fields `modelId`, `questionId`, and repeated **`pageImages`** file parts (binary images; no JSON body and no base64 arrays). Question title, marking scheme text, marks, and language are loaded from the stored answer model (see **`AI_ANALYSE_API_INTEGRATION.md`**).
 
-- Content-Type: `application/json`
+- Content-Type: `multipart/form-data` (required — do not send `application/json`)
 - Auth required: Yes
 
-#### Request JSON fields (camelCase)
+#### Request form fields
 
-- `pageImagesBase64` (array of base64-encoded JPEG/PNG bytes, required, non-empty)
-- `questionTitle` (string, required)
-- `instructionName` (string, optional)
-- `modelDescription` (string, required)
-- `totalMarks` (integer > 0, required)
-- `language` (`en` or `hi`, required)
-- `checkLevel` (`Moderate` or `Hard`, optional; default `Moderate`)
+- `modelId` (string, required)
+- `questionId` (string, required)
+- `pageImages` (file, required, repeat for each page — JPEG/PNG)
+- `checkLevel` (`Moderate` | `Hard`, optional)
+
+Examiner instructions for grading come only from the stored question’s `instruction_name` (not a separate request field).
 
 #### Success Response (`200`)
 
-All keys under `data` are **snake_case**.
+All keys under `data` are **snake_case** (includes `model_id`, `question_id` echoes).
 
-```json
-{
-  "status": 1,
-  "message": "Analysis complete.",
-  "data": {
-    "student_text": "OCR text...",
-    "marks_awarded": 5.0,
-    "confidence_percent": 78.5,
-    "good_points": "• ...",
-    "improvements": "• ...",
-    "final_review": "Overall review...",
-    "annotations": [
-      {
-        "page_index": 0,
-        "y_position_percent": 25.0,
-        "x_start_percent": 10.0,
-        "x_end_percent": 50.0,
-        "comment": "Feedback",
-        "is_positive": true,
-        "line_style": "straight"
-      }
-    ]
-  }
-}
-```
+Details and **curl** examples: **`AI_ANALYSE_API_INTEGRATION.md`**.
 
 ---
 
@@ -675,7 +650,8 @@ Whole-PDF OCR for a **single-question essay-style student answer** (handwriting 
 #### Request form fields
 
 - `file` (PDF file, required)
-- `language` (string, optional; default `en`) — must be `en` or `hi` when sent
+- `language` (string, optional) — `en` or `hi`; if omitted/empty, **`modelId`** may supply language from the stored model
+- `modelId` (string, optional) — when `language` is not set, defaults OCR language from model `lang`
 
 #### Success Response (`200`)
 
@@ -693,6 +669,7 @@ Whole-PDF OCR for a **single-question essay-style student answer** (handwriting 
 #### Validation / business errors (`200`, `status: 0`)
 
 - Not a PDF, empty file, over byte or page limit, unreadable PDF, or OCR returned empty text: explanatory `message`.
+- Unknown **`modelId`** when resolving language: `Model not found.`
 - Missing `GEMINI_API_KEY`: same pattern as other Gemini routes.
 
 #### AI / parsing failures (`500`)
@@ -721,7 +698,8 @@ Same use case as **`/analyse/copy-ocr`** (single-question essay copy → plain t
 #### Request form fields
 
 - `file` (PDF file, required)
-- `language` (string, optional; default `en`) — `en` or `hi`
+- `language` (string, optional) — `en` or `hi`; if omitted/empty, optional **`modelId`** supplies language from the model
+- `modelId` (string, optional)
 
 #### Success Response (`200`)
 
@@ -757,16 +735,14 @@ Same pattern as `/analyse/copy-ocr` (`status: 0` for validation, `500` + `AI ser
 
 ```json
 {
+  "modelId": "<uuid>",
+  "questionId": "q-eng-001",
   "cachedStudentText": "OCR text from previous response...",
-  "questionTitle": "Q3...",
-  "instructionName": "optional examiner notes",
-  "modelDescription": "Marking scheme...",
-  "totalMarks": 8,
-  "pageCount": 2,
-  "language": "en",
   "checkLevel": "Moderate"
 }
 ```
+
+Question metadata, examiner **`instruction_name`**, and **`pageCount`** hint are derived server-side from the stored question (`pageNum`). See **`AI_ANALYSE_API_INTEGRATION.md`**.
 
 #### Success Response (`200`)
 
@@ -779,16 +755,15 @@ Same shape as **`/analyse/full`** (snake_case `data`). `data.student_text` is al
 - Content-Type: `application/json`
 - Auth required: Yes
 
-#### Request (camelCase)
+#### Request (camelCase) — compact rows + DB merge
 
 ```json
 {
+  "modelId": "<uuid>",
   "questionResults": [
     {
-      "questionNo": "1",
-      "title": "Q1 ...",
+      "questionId": "q-eng-001",
       "marksAwarded": 6.0,
-      "marksTotal": 8,
       "goodPoints": "• ...",
       "improvements": "• ...",
       "finalReview": "..."
@@ -888,11 +863,11 @@ Same shape as **`/analyse/full`** (snake_case `data`). `data.student_text` is al
    - manage via `GET/PUT/DELETE /models*` endpoints
    - Optional: `POST /model/answer-expand` to generate a model answer from a question only (no DB; `type` `standard` / `custom` / `custom_with_model` / `essay` for length — see section 5)
 5. For AI checking workflow:
-   - `POST /analyse/full` (JSON base64 page images + grading)
-   - optional `POST /analyse/copy-ocr` or `POST /analyse/copy-ocr-rasterization` (essay PDF → plain `text` + `pageCount`, no DB; rasterization = per-page parallel OCR)
-   - optionally `POST /analyse/cached-ocr`
-   - `POST /analyse/combined-review`
-   - optionally `POST /analyse/intro-page` (separate intro-only use case; JSON `pageImageBase64`)
+   - `POST /analyse/full` (**multipart**: `modelId`, `questionId`, repeated `pageImages` files — scheme/marks from DB)
+   - optional `POST /analyse/copy-ocr` or `POST /analyse/copy-ocr-rasterization` (essay PDF → plain `text` + `pageCount`; optional `modelId` for default language)
+   - optionally `POST /analyse/cached-ocr` (JSON: ids + `cachedStudentText`)
+   - `POST /analyse/combined-review` (JSON: `modelId` + compact `questionResults`)
+   - optionally `POST /analyse/intro-page` (JSON `pageImageBase64`)
 
 ### Token Usage
 
@@ -988,15 +963,16 @@ curl -X POST "http://127.0.0.1:8000/analyse/copy-ocr-rasterization" \
   -F "language=en"
 ```
 
-### Analyse full (JSON base64 images)
-
-Build `PAGE_B64` with `base64 -w0 page1.jpg` (or your tooling), then:
+### Analyse full (multipart — model id, question id, page image files)
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/analyse/full" \
   -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d "{\"pageImagesBase64\":[\"$PAGE_B64\"],\"questionTitle\":\"Q3...\",\"modelDescription\":\"Key points...\",\"totalMarks\":8,\"language\":\"en\",\"checkLevel\":\"Moderate\"}"
+  -F "modelId=<uuid-from-GET-models>" \
+  -F "questionId=q-eng-001" \
+  -F "checkLevel=Moderate" \
+  -F "pageImages=@/absolute/path/page1.jpg;type=image/jpeg" \
+  -F "pageImages=@/absolute/path/page2.jpg;type=image/jpeg"
 ```
 
 ### Analyse intro page (JSON base64)
