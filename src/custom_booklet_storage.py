@@ -21,7 +21,7 @@ def custom_qna_rows_to_canonical_questions(
                 "questionNo": qno,
                 "title": str(row.get("question", "")),
                 "desc": str(row.get("answer", "")),
-                "instructions": "",
+                "instruction_name": "",
                 "pageNum": 1,
                 "marks": 0,
                 "diagramDescriptions": [],

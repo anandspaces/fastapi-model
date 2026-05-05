@@ -12,16 +12,16 @@ _Q_ENG_ID = re.compile(r"^q-eng-(\d+)$", re.I)
 BOOKLET_TYPES = frozenset({"standard", "custom", "custom_with_model", "essay"})
 
 
-def _questions_with_instructions_defaults(questions: list) -> list:
-    """Ensure each question dict has string ``instructions`` (API/read parity vs legacy JSON)."""
+def _questions_with_instruction_name_defaults(questions: list) -> list:
+    """Ensure each question dict has string ``instruction_name`` (API/read parity)."""
     out: list = []
     for q in questions:
         if not isinstance(q, dict):
             out.append(q)
             continue
         d = dict(q)
-        ins = d.get("instructions")
-        d["instructions"] = "" if ins is None else str(ins)
+        ins = d.get("instruction_name")
+        d["instruction_name"] = "" if ins is None else str(ins)
         out.append(d)
     return out
 
@@ -205,7 +205,7 @@ def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
         return None
     questions = json.loads(row["questions_json"])
     if isinstance(questions, list):
-        questions = _questions_with_instructions_defaults(questions)
+        questions = _questions_with_instruction_name_defaults(questions)
     rdict = dict(row)
     booklet_type = rdict.get("booklet_type") or "standard"
     intro_page = int(rdict.get("intro_page") or 2)

@@ -28,7 +28,7 @@ def format_answer_model_as_teacher_instructions(
     """Serialize a model's questions list into the prompt block the evaluator reads.
 
     Each question dict shape (from QuestionPayload / SQLite JSON):
-      questionNo, title, desc, instructions, pageNum, marks, diagramDescriptions
+      questionNo, title, desc, instruction_name, pageNum, marks, diagramDescriptions
     """
     lines: list[str] = [f"Subject / Paper: {title or 'General'}", ""]
     for q in questions:
@@ -38,17 +38,17 @@ def format_answer_model_as_teacher_instructions(
             qlabel = f"Q{qlabel}"
         qtitle = (q.get("title") or "").strip()
         desc = (q.get("desc") or "").strip()
-        instructions = (q.get("instructions") or "").strip()
+        instr_name = str(q.get("instruction_name") or "").strip()
         marks = q.get("marks") or 0
         diagrams = q.get("diagramDescriptions") or []
 
         lines.append(f"{qlabel}. {qtitle}")
         if desc:
             lines.append(f"   Model booklet (ideal answer): {desc}")
-        if instructions:
+        if instr_name:
             lines.append(
                 f"   Instructions (examiner marking key — weigh like the booklet text): "
-                f"{instructions}"
+                f"{instr_name}"
             )
         if diagrams:
             lines.append(f"   Diagrams/Key points: {'; '.join(str(d) for d in diagrams)}")
@@ -106,7 +106,7 @@ Your job: Based on the TEACHER INSTRUCTIONS, grade the student's extracted answe
 MARKING RULES:
 {strict_line}
 - The `max_marks` in your output MUST exactly match the "MAX MARKS ALLOWED" for each question in the TEACHER INSTRUCTIONS.
-- **Booklet vs instructions:** When a question includes **Instructions (examiner marking key)**, factor that content into gaps, positives, marks, `feedback`, and `annotations` the same way you use the **Model booklet (ideal answer)** — it is part of the model key, not optional commentary.
+- **Booklet vs instruction_name:** When a question includes markdown **Instructions (examiner marking key)** (from field ``instruction_name``), factor that content into gaps, positives, marks, `feedback`, and `annotations` the same way you use the **Model booklet (ideal answer)** — it is part of the model key, not optional commentary.
 - Award `marks_awarded` as a DECIMAL in multiples of 0.5 (0, 0.5, 1, 1.5, ...).
 - NEVER EXCEED the "MAX MARKS ALLOWED" for a question. If a student's answer is perfect, give exactly the MAX MARKS ALLOWED.
 - CONCEPTUAL FLEXIBILITY: Evaluate with deep human intelligence! Do not blindly string-match; award full marks if the underlying meaning and logic is identical.

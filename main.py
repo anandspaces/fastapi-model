@@ -561,7 +561,7 @@ async def reorder_model_questions(
 def _question_payload_log_dict(payload: QuestionPayload) -> dict[str, object]:
     d = payload.model_dump()
     preview_len = 300
-    for key in ("desc", "instructions"):
+    for key in ("desc", "instruction_name"):
         text = str(d.get(key) or "")
         prev = text[:preview_len] + (
             f"... (+{len(text) - preview_len} chars)" if len(text) > preview_len else ""
