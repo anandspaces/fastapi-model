@@ -6,7 +6,6 @@ No Gemini, no DB, no auth — pure image analysis.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 import fitz  # PyMuPDF
@@ -18,7 +17,6 @@ from src.free_space_utils import (
     find_free_zones,
     get_grid_scores,
     merge_adjacent_zones,
-    score_cell,
 )
 
 log = logging.getLogger(__name__)
