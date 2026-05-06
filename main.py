@@ -1368,7 +1368,6 @@ async def post_analyse_smart_ocr(
     file: UploadFile = File(...),
     language: str = Form("en"),
     model_id: str = Form("", alias="modelId"),
-    snap_annotations: bool = Form(True, alias="snapAnnotations"),
     check_level: str = Form("Moderate", alias="checkLevel"),
 ) -> JSONResponse:
     """Extracts question-wise answers and marking coordinates from a PDF.
@@ -1516,30 +1515,6 @@ async def post_analyse_smart_ocr(
                 mid,
                 len(items),
             )
-            if snap_annotations:
-                try:
-                    page_zones = await asyncio.to_thread(
-                        analyze_pdf_free_space,
-                        raw,
-                    )
-                    items = snap_items_annotations(items, page_zones)
-                    snapped = sum(
-                        1
-                        for it in items
-                        for ann in (it.get("annotations") or [])
-                        if ann.get("_snapped")
-                    )
-                    log.info(
-                        "analyse/smart-ocr snap ok request_id=%s snapped_annotations=%s",
-                        rid,
-                        snapped,
-                    )
-                except Exception as snap_err:
-                    log.warning(
-                        "analyse/smart-ocr snap failed request_id=%s: %s",
-                        rid,
-                        snap_err,
-                    )
         except Exception as e:
             log.exception(
                 "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid

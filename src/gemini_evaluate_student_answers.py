@@ -202,9 +202,71 @@ def _strip_json_fence(text: str) -> str:
     return m.group(1).strip() if m else t
 
 
+def _repair_truncated_json(text: str) -> str:
+    """
+    Best-effort repair of malformed/truncated Gemini JSON.
+
+    Handles two failure modes observed in production:
+    1. Trailing commas before } or ] (→ strip them).
+    2. Output truncated mid-string/mid-object (→ find last complete object
+       and close the array at that point).
+    """
+    # Pass 1: strip trailing commas before closing delimiters
+    t = re.sub(r",\s*([}\]])", r"\1", text)
+
+    try:
+        json.loads(t)
+        return t
+    except json.JSONDecodeError:
+        pass
+
+    # Pass 2: find the end of the last fully-closed top-level JSON object.
+    # Walk character-by-character tracking brace depth, skipping strings.
+    depth = 0
+    in_str = False
+    escape = False
+    last_complete_end = -1
+
+    for i, ch in enumerate(t):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                last_complete_end = i
+
+    if last_complete_end > 0:
+        # Close the array after the last complete object and re-validate
+        repaired = t[: last_complete_end + 1] + "]"
+        try:
+            json.loads(repaired)
+            return repaired
+        except json.JSONDecodeError:
+            pass
+
+    return t
+
+
 def _parse_evaluation_response(raw: str) -> list[dict[str, Any]]:
     cleaned = _strip_json_fence(raw)
-    parsed = json.loads(cleaned)
+    # First attempt: strict parse
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Second attempt: repair common truncation / trailing-comma issues
+        repaired = _repair_truncated_json(cleaned)
+        parsed = json.loads(repaired)
     if not isinstance(parsed, list):
         raise ValueError("Evaluation response is not a JSON array.")
     return [dict(item) for item in parsed]
@@ -511,7 +573,7 @@ def evaluate_student_answers_against_model(
     client = genai.Client(api_key=api_key)
     cfg = types.GenerateContentConfig(
         temperature=0.1,
-        max_output_tokens=8192,
+        max_output_tokens=65536,
         response_mime_type="application/json",
     )
 
