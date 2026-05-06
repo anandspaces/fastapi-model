@@ -7,13 +7,22 @@ from typing import Any
 
 import fitz  # PyMuPDF
 import numpy as np
+import scipy.ndimage as ndi
 
-CELL_SIZE_PTS: float = 25.0
+CELL_SIZE_PTS: float = 20.0
+
+# When you run:  python3 cell_grid_service_v3.py
+INPUT_PDF_RELATIVE_PATH = "test_pdf3.pdf"
+OUTPUT_PDF_RELATIVE_PATH = "cell_grid_v3_pdf3.pdf"
+
 WRITABLE_MIN_SCORE: float = 0.85
 INK_PIXEL_BRIGHTNESS_MAX: float = 0.45
-MAX_INK_PIXEL_RATIO: float = 0.03
+MAX_INK_PIXEL_RATIO: float = 0.05
+MAX_INK_BLOB_FRACTION: float = 0.012
 RASTER_DPI: int = 300
 MIN_RUN_LENGTH: int = 2
+
+_OPEN_STRUCT_2X2 = np.ones((2, 2), dtype=bool)
 
 
 @dataclass
@@ -84,6 +93,7 @@ def analyze_pdf_writable_runs(
     cell_size_pts: float = CELL_SIZE_PTS,
     min_score: float = WRITABLE_MIN_SCORE,
     max_ink_ratio: float = MAX_INK_PIXEL_RATIO,
+    max_blob_fraction: float = MAX_INK_BLOB_FRACTION,
     ink_brightness_max: float = INK_PIXEL_BRIGHTNESS_MAX,
     dpi: int = RASTER_DPI,
     min_run_length: int = MIN_RUN_LENGTH,
@@ -125,11 +135,15 @@ def analyze_pdf_writable_runs(
                 y0_px = max(0, int(top_dist * scale))
                 y1_px = min(gray.shape[0], max(y0_px + 1, int(bottom_dist * scale)))
 
-                score, ink_ratio = _cell_metrics(
+                score, ink_ratio, blob_frac = _cell_metrics(
                     gray[y0_px:y1_px, x0_px:x1_px],
                     ink_brightness_max=ink_brightness_max,
                 )
-                if score >= min_score and ink_ratio <= max_ink_ratio:
+                if (
+                    score >= min_score
+                    and ink_ratio <= max_ink_ratio
+                    and blob_frac <= max_blob_fraction
+                ):
                     writable_cols.append(c)
                     scores_by_col[c] = score
                     ink_by_col[c] = ink_ratio
@@ -258,20 +272,33 @@ def _merge_row_runs(
 
 
 def _score_cell(cell: np.ndarray) -> float:
+    """Brightness-only score in [0, 1]; empty cells read high."""
     if cell.size == 0:
         return 0.0
-    mean = float(np.mean(cell))
-    std = float(np.std(cell))
-    std_factor = min(1.0, std * 3.0)
-    return max(0.0, min(1.0, mean * (1.0 - std_factor)))
+    return max(0.0, min(1.0, float(np.mean(cell))))
 
 
-def _cell_metrics(cell: np.ndarray, *, ink_brightness_max: float) -> tuple[float, float]:
-    score = _score_cell(cell)
+def _cell_metrics(
+    cell: np.ndarray, *, ink_brightness_max: float
+) -> tuple[float, float, float]:
+    """Return (score, cleaned ink_ratio, max_blob_fraction)."""
     if cell.size == 0:
-        return score, 1.0
-    ink_ratio = float(np.mean(cell < ink_brightness_max))
-    return score, ink_ratio
+        return 0.0, 1.0, 1.0
+    h, w = int(cell.shape[0]), int(cell.shape[1])
+    inner = cell[1:-1, 1:-1] if h > 2 and w > 2 else cell
+    score = _score_cell(inner)
+    if inner.size == 0:
+        return score, 1.0, 1.0
+    binary = inner < ink_brightness_max
+    cleaned = ndi.binary_opening(binary, structure=_OPEN_STRUCT_2X2)
+    ink_ratio = float(np.mean(cleaned))
+    labeled, num_features = ndi.label(cleaned)
+    if num_features == 0:
+        max_blob_frac = 0.0
+    else:
+        counts = np.bincount(labeled.ravel())
+        max_blob_frac = float(np.max(counts[1:])) / float(cleaned.size)
+    return score, ink_ratio, max_blob_frac
 
 
 def _rasterize_pdf_to_gray_arrays(pdf_bytes: bytes, *, dpi: int = RASTER_DPI) -> list[np.ndarray]:
@@ -290,3 +317,15 @@ def _rasterize_pdf_to_gray_arrays(pdf_bytes: bytes, *, dpi: int = RASTER_DPI) ->
         arrays.append(gray)
     doc.close()
     return arrays
+
+
+if __name__ == "__main__":
+    _root = Path(__file__).resolve().parent
+    _inp = _root / INPUT_PDF_RELATIVE_PATH
+    _out = _root / OUTPUT_PDF_RELATIVE_PATH
+    if not _inp.is_file():
+        raise SystemExit(f"Input PDF not found: {_inp}")
+    _bytes = _inp.read_bytes()
+    _runs = analyze_pdf_writable_runs(_bytes, dpi=150, min_run_length=MIN_RUN_LENGTH)
+    draw_writable_runs_overlay(_bytes, _runs, _out)
+    print(_out.resolve())
