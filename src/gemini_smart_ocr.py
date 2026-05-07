@@ -24,7 +24,17 @@ from src.gemini_copy_ocr import (
 )
 from src.gemini_extract import MODEL_ID
 
+from cell_grid_service_v3 import (
+    PageWritableRuns,
+    WritableRun,
+    analyze_pdf_writable_runs,
+)
+
 log = logging.getLogger(__name__)
+
+# Cell-grid marking injection (parallel with Gemini OCR/structure; see smart_ocr_extract_student_answers).
+CELL_GRID_MIN_RUN_LENGTH: int = 3
+CELL_GRID_DPI: int = 200
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -828,6 +838,54 @@ def _structure_qa_with_fallback(
     return rows
 
 
+def _pick_best_run(
+    runs: list[WritableRun],
+    start_y_pct: float,
+    end_y_pct: float,
+) -> WritableRun | None:
+    """Longest writable run overlapping [start_y_pct, end_y_pct]; tie-break lower on page."""
+    lo, hi = min(start_y_pct, end_y_pct), max(start_y_pct, end_y_pct)
+    candidates = [
+        r
+        for r in runs
+        if r.cell_count >= CELL_GRID_MIN_RUN_LENGTH
+        and r.y_start_percent <= hi
+        and r.y_end_percent >= lo
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: (-r.cell_count, -r.y_start_percent))
+    return candidates[0]
+
+
+def _inject_marking_boxes(
+    items: list[dict[str, Any]],
+    page_runs: list[PageWritableRuns],
+) -> None:
+    """Mutates items in place: adds marking_box_* and overwrites marking_* from cell-grid runs."""
+    runs_by_page = {p.page: p.runs for p in page_runs}
+    for item in items:
+        sp = int(item.get("start_page", 1))
+        ep = int(item.get("end_page", sp))
+        sy = float(item.get("start_y_position_percent", 0.0))
+        ey = float(item.get("end_y_position_percent", 100.0))
+        run = _pick_best_run(runs_by_page.get(sp, []), sy, ey)
+        if run is None and ep != sp:
+            run = _pick_best_run(runs_by_page.get(ep, []), sy, ey)
+        if run is None:
+            continue
+        cx = round((run.x_start_percent + run.x_end_percent) / 2.0, 2)
+        cy = round((run.y_start_percent + run.y_end_percent) / 2.0, 2)
+        item["marking_page"] = run.page
+        item["marking_x_position_percent"] = cx
+        item["marking_y_position_percent"] = cy
+        item["marking_box_page"] = run.page
+        item["marking_box_x1_percent"] = run.x_start_percent
+        item["marking_box_y1_percent"] = run.y_start_percent
+        item["marking_box_x2_percent"] = run.x_end_percent
+        item["marking_box_y2_percent"] = run.y_end_percent
+
+
 # --- Public API ------------------------------------------------------------------------
 
 
@@ -853,6 +911,15 @@ def smart_ocr_extract_student_answers(
         raise ValueError(
             f"PDF has {total_pages} page(s); maximum allowed is {max_pages} (COPY_OCR_MAX_PAGES)."
         )
+
+    pdf_bytes = pdf_path.read_bytes()
+    grid_pool = ThreadPoolExecutor(max_workers=1)
+    grid_future = grid_pool.submit(
+        analyze_pdf_writable_runs,
+        pdf_bytes,
+        min_run_length=CELL_GRID_MIN_RUN_LENGTH,
+        dpi=CELL_GRID_DPI,
+    )
 
     run_classify = _env_bool("SMART_OCR_CLASSIFY", True)
 
@@ -964,5 +1031,17 @@ def smart_ocr_extract_student_answers(
         request_id,
         len(rows),
     )
+
+    try:
+        page_runs = grid_future.result()
+        _inject_marking_boxes(rows, page_runs)
+    except Exception as e:
+        log.warning(
+            "smart_ocr[%s] cell_grid marking injection failed: %s",
+            request_id,
+            e,
+        )
+    finally:
+        grid_pool.shutdown(wait=False)
 
     return {"items": rows, "page_count": total_pages}

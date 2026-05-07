@@ -43,9 +43,18 @@ Success payloads under `data` use **snake_case** keys (e.g. `student_text`, `mar
   "x_end_percent": 53.0,
   "comment": "Well articulated — this directly addresses the marking scheme.",
   "is_positive": true,
-  "line_style": "straight"
+  "line_style": "straight",
+  "bbox": {
+    "page": 1,
+    "x1_percent": 40.12,
+    "y1_percent": 55.30,
+    "x2_percent": 72.45,
+    "y2_percent": 62.10
+  }
 }
 ```
+
+Optional **`bbox`** (object): returned by **`POST /analyse/smart-ocr`** after Stage 3 grading. **`page`** is **1-based** (aligned with PDF page numbering and marking-box fields elsewhere). **`x1_percent`**, **`y1_percent`**, **`x2_percent`**, **`y2_percent`** are axis-aligned bounds in **percent of page width/height** (0–100). The server still uses the internal cell grid ([`cell_grid_service.analyze_pdf_cell_grid`](cell_grid_service.py)) only to **compute** placement; **`bbox`** is the union rectangle of those cells, so clients do **not** need cell size, margins, or grid layout. Same layout rules as before (nominal **`REMARK_FONT_SIZE_PTS`**, wrap within writable cells, relocate to nearest writable run): **`REMARK_FONTNAME_EN`**, **`REMARK_FONTNAME_HI`**, **`REMARK_MAX_WRAP_ROWS`**. **`page_index`** on the annotation remains **0-based** for older UIs; new integrations can rely on **`bbox.page`**.
 
 ---
 
@@ -188,6 +197,16 @@ Same as full analysis response object.
 - Keep all rows including blank marks cells
 - If Gemini output is malformed, use regex fallback extraction
 - If no candidates, return empty `cells`
+
+---
+
+## Smart OCR (`POST /analyse/smart-ocr`)
+
+Multipart upload: **`file`** (PDF), **`language`** (`en` | `hi`), optional **`modelId`**, optional **`checkLevel`** (`Moderate` | `Hard`).
+
+Returns **`items`** with per-question layout (`start_page`, marking percentages, etc.). When **`modelId`** is set, Stage 3 grading merges **`feedback`**, **`annotations`**, and marks into each item.
+
+Each annotation dict may include **`bbox`** (see Shared Response — Annotation Object): the percent rectangle covering the remark placement derived from the same internal grid pipeline as `cell_grid_service`, without exposing grid metadata to the client.
 
 ---
 

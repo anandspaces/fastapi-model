@@ -19,6 +19,35 @@ def test_normalize_page_index_multipage_prefers_zero_based_on_overlap():
     assert _normalize_annotation_page_index(3, item) == 2
 
 
+def test_normalize_page_index_clamps_below_start_page():
+    """Out-of-range raw page (e.g. Gemini emitting start_page-2) clamps to start_page-1.
+
+    Reproduces the production bug where Q5 (start_page=10, end_page=11) had
+    annotations with raw page_index=8, which previously fell through unchanged
+    and snapped onto page 9 — the *previous* question's writing space.
+    """
+    item = {"start_page": 10, "end_page": 11, "marking_page": 10}
+    assert _normalize_annotation_page_index(8, item) == 9
+    assert _normalize_annotation_page_index(7, item) == 9
+    assert _normalize_annotation_page_index(0, item) == 9
+
+
+def test_normalize_page_index_clamps_above_end_page():
+    """Raw page beyond end_page clamps to end_page-1 (closest valid 0-based)."""
+    item = {"start_page": 10, "end_page": 11, "marking_page": 10}
+    # 12 / 13 / 50 are out of both 0-based and 1-based ranges → clamp to end_page-1 = 10.
+    assert _normalize_annotation_page_index(12, item) == 10
+    assert _normalize_annotation_page_index(13, item) == 10
+    assert _normalize_annotation_page_index(50, item) == 10
+
+
+def test_normalize_page_index_singlepage_out_of_range_clamps():
+    """Single-page answer with bogus raw page_index clamps to that single page."""
+    item = {"start_page": 5, "end_page": 5, "marking_page": 5}
+    assert _normalize_annotation_page_index(0, item) == 4
+    assert _normalize_annotation_page_index(7, item) == 4
+
+
 def test_merge_reseeds_marking_page_coords_and_spreads_y():
     items = [
         {

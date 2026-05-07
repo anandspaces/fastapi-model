@@ -820,8 +820,10 @@ def analyze_pdf_free_space(
         proximity_full = _ink_proximity_map(ink_bool, sigma_px)
 
         # Step 4: clip to content area
-        x0 = int(w * left_margin);  x1 = int(w * right_margin)
-        y0 = int(h * top_margin);   y1 = int(h * bottom_margin)
+        x0 = int(w * left_margin)
+        x1 = int(w * right_margin)
+        y0 = int(h * top_margin)
+        y1 = int(h * bottom_margin)
         proximity_content = proximity_full[y0:y1, x0:x1]
 
         # Step 5: sample

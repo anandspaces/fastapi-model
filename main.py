@@ -31,6 +31,14 @@ from src.gemini_copy_ocr import (
     ocr_essay_copy_pdf,
     ocr_essay_copy_pdf_rasterized,
 )
+from cell_grid_service import analyze_pdf_cell_grid
+from remark_cell_layout_service import (
+    REMARK_FONTNAME_EN,
+    REMARK_FONTNAME_HI,
+    REMARK_FONT_SIZE_PTS,
+    REMARK_MAX_WRAP_ROWS,
+    assign_bboxes_to_annotations,
+)
 from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
@@ -1144,7 +1152,7 @@ async def post_api_v1_combined_review(
 async def post_api_v1_analyse_intro_page(
     request: Request, payload: IntroPageJsonRequest
 ) -> JSONResponse:
-    """Intro/cover marks table extraction (Flutter ``analyseIntroPage`` replacement)."""
+    """Intro/cover marks table extraction (``analyseIntroPage`` replacement)."""
     user, auth_err = _require_auth_user(request)
     if auth_err:
         return auth_err
@@ -1374,11 +1382,15 @@ async def post_analyse_smart_ocr(
 
     If modelId is provided, also runs Stage 3 grading against the stored answer
     model and merges marks, status, feedback, and annotations into each object
-    in ``items`` (same ``question_id``). Intro/cover pages are segregated in the
+    in ``items`` (same ``question_id``). When grading runs, each annotation may
+    include ``bbox`` (page + percent rectangle): smallest axis-aligned box covering
+    the same laid-out cells as the internal grid logic at nominal
+    ``REMARK_FONT_SIZE_PTS``. Consumers need no grid metadata. Intro/cover
+    pages are segregated in the
     structure (phase 2) pass, not via extra API parameters.
 
     Optional Form field ``checkLevel`` (``Moderate`` | ``Hard``) controls evaluator
-    strictness when grading with ``modelId`` — matches Flutter ``checkLevel``.
+    strictness when grading with ``modelId`` — matches ``checkLevel``.
 
     Response includes ``skippedPages``: 1-based page indexes not covered by any
     structured question row (typically intro/cover sheets).
@@ -1490,6 +1502,10 @@ async def post_analyse_smart_ocr(
         len(items),
     )
 
+    # Cell grid analysis runs concurrently with Stage 3 grading (when modelId set).
+    grid_task = asyncio.create_task(asyncio.to_thread(analyze_pdf_cell_grid, raw))
+    remark_font = REMARK_FONTNAME_HI if lang == "hi" else REMARK_FONTNAME_EN
+
     # --- Stage 3: grading (only when modelId provided) ---
     if answer_model:
         try:
@@ -1519,6 +1535,21 @@ async def post_analyse_smart_ocr(
             log.exception(
                 "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid
             )
+            try:
+                page_grids = await grid_task
+                assign_bboxes_to_annotations(
+                    items,
+                    page_grids,
+                    font_size_pts=REMARK_FONT_SIZE_PTS,
+                    fontname=remark_font,
+                    max_wrap_rows=REMARK_MAX_WRAP_ROWS,
+                )
+            except Exception as grid_exc:
+                log.warning(
+                    "analyse/smart-ocr bbox enrich failed request_id=%s: %s",
+                    rid,
+                    grid_exc,
+                )
             # Don't fail the whole response — return OCR items with error note
             return JSONResponse(
                 _ok(
@@ -1531,6 +1562,22 @@ async def post_analyse_smart_ocr(
                     skippedPages=_smart_ocr_skipped_pages(page_count, items),
                 )
             )
+
+    try:
+        page_grids = await grid_task
+        assign_bboxes_to_annotations(
+            items,
+            page_grids,
+            font_size_pts=REMARK_FONT_SIZE_PTS,
+            fontname=remark_font,
+            max_wrap_rows=REMARK_MAX_WRAP_ROWS,
+        )
+    except Exception as grid_exc:
+        log.warning(
+            "analyse/smart-ocr bbox enrich failed request_id=%s: %s",
+            rid,
+            grid_exc,
+        )
 
     # --- Build response ---
     extra: dict = {"checkLevel": check_canon}

@@ -73,7 +73,7 @@ def normalize_evaluation_check_level(raw: str) -> str:
 
 
 def evaluation_strictness_instruction(check_level: str) -> str:
-    """Same semantics as Flutter ``GeminiService`` Moderate vs Hard grading lines."""
+    """Same semantics as ``GeminiService`` Moderate vs Hard grading lines."""
     if (check_level or "").strip().lower() == "hard":
         return (
             "- **EVALUATION STRICTNESS: HARD.** Be extremely strict. All answers must be "
@@ -388,6 +388,10 @@ def _normalize_annotation_page_index(raw: Any, item: dict[str, Any]) -> int:
     Gemini may emit physical (1-based) page numbers or 0-based raster indices. For answers that
     span multiple sheets, overlaps (e.g. ``p`` valid as both) follow the evaluator prompt's
     0-based convention; single-sheet rows still remap ``page_index === start_page`` from 1-based.
+
+    When ``raw`` falls outside both 0-based and 1-based valid ranges, the result is clamped
+    to the nearest 0-based page within ``[start_page-1, end_page-1]``. This prevents Gemini
+    page-index slips from snapping annotations onto a previous question's writing space.
     """
     try:
         p = int(raw)
@@ -426,6 +430,8 @@ def _normalize_annotation_page_index(raw: Any, item: dict[str, Any]) -> int:
                 return p
             if valid_ob:
                 return p - 1
+            # Out of both ranges → clamp to closest valid 0-based answer page.
+            return max(zb_lo, min(zb_hi, p))
     mp = item.get("marking_page")
     if mp is not None:
         try:
@@ -560,7 +566,7 @@ def evaluate_student_answers_against_model(
 ) -> list[dict[str, Any]]:
     """Call Gemini to grade student OCR items against the teacher model key.
 
-    ``check_level`` is ``Moderate`` or ``Hard`` (Dart / Flutter ``checkLevel`` parity).
+    ``check_level`` is ``Moderate`` or ``Hard`` (``checkLevel`` parity).
 
     Returns a list of evaluation dicts (one per teacher question).
     Raises ValueError if all attempts fail and regex fallback is also empty.
