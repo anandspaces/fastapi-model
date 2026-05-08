@@ -35,9 +35,13 @@ from scipy import ndimage
 
 CELL_SIZE_PTS: float = 24.0
 RASTER_DPI: int = 300
-INK_BRIGHTNESS_MAX: float = 0.45
-WRITABLE_MIN_SCORE: float = 0.70
-MAX_INK_PIXEL_RATIO: float = 0.04
+# Stricter thresholds so faint / light-gray ink still counts as "occupied":
+#   * brightness cut-off raised 0.45 -> 0.75 to catch pencil & faded pen strokes
+#   * min writable score raised 0.70 -> 0.88 (cells must be near-paper-white)
+#   * max ink ratio tightened 0.04 -> 0.005 (almost zero ink pixels permitted)
+INK_BRIGHTNESS_MAX: float = 0.75
+WRITABLE_MIN_SCORE: float = 0.88
+MAX_INK_PIXEL_RATIO: float = 0.005
 MIN_RUN_LENGTH: int = 2
 MIN_REGION_CELLS: int = 2
 
@@ -309,18 +313,23 @@ def _rasterize_gray(page: fitz.Page, *, dpi: int) -> np.ndarray:
 
 
 def _build_clean_ink_mask(gray: np.ndarray, *, ink_brightness_max: float) -> np.ndarray:
-    """Binary ink mask after morphological cleanup.
+    """Binary ink mask after morphological cleanup — strict variant.
 
-    1. Threshold gray < ink_brightness_max → raw ink.
-    2. Close 3x3 (1 iter) — fills single-pixel specks so they are not
-       counted as "free" pinpricks; preserves stroke continuity.
-    3. Erode 3x3 (1 iter) — shrinks ink boundary by 1 px so cells whose
-       edge merely brushes a stroke are not disqualified.
+    1. Threshold gray < ink_brightness_max → raw ink (high cut-off catches
+       faint pencil / faded pen strokes).
+    2. Dilate 3x3 (1 iter) — grows faint specks so a halo of light gray
+       around a stroke gets pulled into the ink mask.
+    3. Close 3x3 (1 iter) — fills single-pixel gaps inside strokes.
+
+    Erosion is intentionally omitted: the v3-style 1-px shrink lets cells
+    that brush against ink pass the ink_ratio gate, which is exactly what
+    we are trying to prevent here.
     """
     raw = gray < ink_brightness_max
-    closed = ndimage.binary_closing(raw, structure=np.ones((3, 3), dtype=bool), iterations=1)
-    eroded = ndimage.binary_erosion(closed, structure=np.ones((3, 3), dtype=bool), iterations=1)
-    return eroded
+    structure = np.ones((3, 3), dtype=bool)
+    dilated = ndimage.binary_dilation(raw, structure=structure, iterations=1)
+    closed = ndimage.binary_closing(dilated, structure=structure, iterations=1)
+    return closed
 
 
 def _cell_metrics(gray_cell: np.ndarray, ink_cell: np.ndarray) -> tuple[float, float]:

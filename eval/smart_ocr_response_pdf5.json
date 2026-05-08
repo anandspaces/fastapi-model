@@ -1,0 +1,72 @@
+{
+  "status": 1,
+  "message": "Smart OCR complete.",
+  "data": {
+    "pageCount": 4,
+    "items": [
+      {
+        "question_id": 1,
+        "max_marks": 0, "marks_awarded": 0.0, "status": "partial",
+        "marking_page": 2,
+        "marking_x_position_percent": 66.38, "marking_y_position_percent": 56.95,
+        "marking_box_page": 2,
+        "marking_box_x1_percent": 53.78, "marking_box_y1_percent": 55.46,
+        "marking_box_x2_percent": 78.99, "marking_box_y2_percent": 58.43,
+        "annotations": [
+          {"page_index": 1, "is_positive": false,
+           "comment": "Avoid separating moral and emotional processes so rigidly; EI is integral to internalizing moral values.",
+           "cell_ids": ["F15","G15","H15","I15","J15","K15","L15","M15","N15","O15","P15",
+                        "F16","G16","H16","I16","J16","K16","L16","M16","N16","O16","P16"],
+           "range_id": "F15:P16", "placement_tier": 1,
+           "bbox": {"page": 2, "x1_percent": 21.76, "y1_percent": 40.02, "x2_percent": 66.13, "y2_percent": 45.72}},
+          {"page_index": 1, "is_positive": false,
+           "comment": "Expand on how it helps—mention self-regulation, empathy, and managing cognitive biases.",
+           "cell_ids": ["A22","B22","C22","D22","E22","F22","G22","H22","I22",
+                        "A23","B23","C23","D23","E23","F23","G23","H23","I23"],
+           "range_id": "A22:I23", "placement_tier": 1,
+           "bbox": {"page": 2, "x1_percent": 1.6, "y1_percent": 59.98, "x2_percent": 37.9, "y2_percent": 65.68}},
+          {"page_index": 2, "is_positive": false,
+           "comment": "These reasons are too generic. Link the 'overlooked' aspect to bureaucratic rigidity or over-reliance on pure rationality.",
+           "cell_ids": ["A12","B12","C12","D12","E12","F12","G12","H12","I12","J12","K12","L12",
+                        "A13","B13","C13","D13","E13","F13","G13","H13","I13","J13","K13","L13"],
+           "range_id": "A12:L13", "placement_tier": 1,
+           "bbox": {"page": 3, "x1_percent": 1.6, "y1_percent": 31.47, "x2_percent": 50.0, "y2_percent": 37.17}},
+          {"page_index": 2, "is_positive": false,
+           "comment": "Weak conclusion. Synthesize how EI bridges cognitive reasoning and actual ethical behavior in public service.",
+           "cell_ids": ["A34","B34","C34","D34","E34","F34","G34","H34","I34","J34","K34","L34",
+                        "A35","B35","C35","D35","E35","F35","G35","H35","I35","J35","K35","L35"],
+           "range_id": "A34:L35", "placement_tier": 1,
+           "bbox": {"page": 3, "x1_percent": 1.6, "y1_percent": 94.18, "x2_percent": 50.0, "y2_percent": 99.88}}
+        ]
+      },
+      {
+        "question_id": 2,
+        "max_marks": 0, "marks_awarded": 0.0, "status": "partial",
+        "marking_page": 4,
+        "marking_x_position_percent": 68.48, "marking_y_position_percent": 56.95,
+        "marking_box_page": 4,
+        "marking_box_x1_percent": 57.98, "marking_box_y1_percent": 55.46,
+        "marking_box_x2_percent": 78.99, "marking_box_y2_percent": 58.43,
+        "annotations": [
+          {"page_index": 3, "is_positive": false,
+           "comment": "Adequate opening, but explicitly mentioning 'Daridra Narayana' would elevate the conceptual depth.",
+           "cell_ids": ["C33","D33","E33","F33","G33","H33","I33","J33","K33","L33","M33","N33","O33","P33","Q33","R33","S33","T33","U33","V33","W33"],
+           "range_id": "C33:W33", "placement_tier": 1,
+           "bbox": {"page": 4, "x1_percent": 9.66, "y1_percent": 91.33, "x2_percent": 94.37, "y2_percent": 94.18}},
+          {"page_index": 3, "is_positive": false,
+           "comment": "Answer abruptly ends. You must include concrete administrative examples and dimensions like empathy (Antyodaya).",
+           "cell_ids": ["G31","H31","I31","J31","K31","L31","M31","N31","O31","P31","Q31","R31",
+                        "G32","H32","I32","J32","K32","L32","M32","N32","O32","P32","Q32","R32"],
+           "range_id": "G31:R32", "placement_tier": 1,
+           "bbox": {"page": 4, "x1_percent": 25.8, "y1_percent": 85.63, "x2_percent": 74.2, "y2_percent": 91.33}}
+        ]
+      }
+    ],
+    "cellGridMeta": [
+      {"page": 1, "rows": 35, "cols": 24, "cell_size_pts": 24.0, "left_margin_pts": 9.5, "top_margin_pts": 1.0, "page_w_pts": 595.0, "page_h_pts": 842.0},
+      {"page": 2, "rows": 35, "cols": 24, "cell_size_pts": 24.0, "left_margin_pts": 9.5, "top_margin_pts": 1.0, "page_w_pts": 595.0, "page_h_pts": 842.0},
+      {"page": 3, "rows": 35, "cols": 24, "cell_size_pts": 24.0, "left_margin_pts": 9.5, "top_margin_pts": 1.0, "page_w_pts": 595.0, "page_h_pts": 842.0},
+      {"page": 4, "rows": 35, "cols": 24, "cell_size_pts": 24.0, "left_margin_pts": 9.5, "top_margin_pts": 1.0, "page_w_pts": 595.0, "page_h_pts": 842.0}
+    ]
+  }
+}

@@ -605,6 +605,32 @@ def _v4_anchor_rc(grid: Any, x_pct: float, y_pct: float) -> tuple[int, int]:
     return row, col
 
 
+def _v4_carve_score(
+    r0: int,
+    c0: int,
+    needed_rows: int,
+    needed_cols: int,
+    anchor_row: int,
+    anchor_col: int,
+    grid_cols: int,
+) -> float:
+    """Lower is better.  Combines anchor-distance, margin-edge penalty,
+    and a wide-strip penalty so that a 1-row placement spanning most of
+    the page loses to a compact 2-row placement of the same area.
+    """
+    cy = r0 + needed_rows / 2.0
+    cx = c0 + needed_cols / 2.0
+    dist = math.hypot(cy - anchor_row, cx - anchor_col)
+    margin_penalty = 0.0
+    if grid_cols > 0:
+        if c0 <= 1:
+            margin_penalty += 3.0
+        if c0 + needed_cols - 1 >= grid_cols:
+            margin_penalty += 3.0
+    aspect_penalty = max(0.0, (needed_cols / max(1, needed_rows)) - 8.0) * 0.3
+    return dist + margin_penalty + aspect_penalty
+
+
 def _v4_carve_subrect(
     region: Any,
     anchor_row: int,
@@ -612,11 +638,15 @@ def _v4_carve_subrect(
     needed_rows: int,
     needed_cols: int,
     consumed: set[tuple[int, int]],
-) -> list[str] | None:
+    *,
+    grid_cols: int = 0,
+) -> tuple[float, list[str]] | None:
     """Pick a ``needed_rows × needed_cols`` block from ``region`` near the anchor.
 
-    Returns ordered cell-id list (left→right, top→bottom) or ``None`` if no
-    sub-rect both fits inside the region and avoids ``consumed``.
+    Returns ``(score, cells)`` or ``None`` if no sub-rect both fits inside the
+    region and avoids ``consumed``. Lower score is better — see
+    :func:`_v4_carve_score` for components (anchor distance, margin penalty,
+    aspect-ratio penalty).
     """
     r1 = region.row_start
     r2 = region.row_end
@@ -647,12 +677,12 @@ def _v4_carve_subrect(
                     break
             if not ok:
                 continue
-            cy = r0 + needed_rows / 2
-            cx = c0 + needed_cols / 2
-            dist = math.hypot(cy - anchor_row, cx - anchor_col)
-            if best is None or dist < best[0]:
-                best = (dist, cells)
-    return best[1] if best is not None else None
+            score = _v4_carve_score(
+                r0, c0, needed_rows, needed_cols, anchor_row, anchor_col, grid_cols
+            )
+            if best is None or score < best[0]:
+                best = (score, cells)
+    return best
 
 
 def _v4_bbox_from_cells(grid: Any, cell_ids: list[str]) -> dict[str, Any] | None:
@@ -783,36 +813,58 @@ def assign_cell_ids_v4(
             )
             anchor_row, anchor_col = _v4_anchor_rc(grid, x0, yp)
 
-            # Choose row count: try 1 first, then expand if region-friendly
+            # Evaluate every needed_rows ∈ [1..max_wrap_rows] and pick the
+            # lowest-scoring placement across all of them. This lets a compact
+            # 2-row interior placement beat a 1-row strip that touches a margin.
             placed: list[str] = []
             tier = _TIER_SYNTH
+            best_global: tuple[float, list[str]] | None = None
+            grid_cols = int(getattr(grid, "cols", 0) or 0)
 
             for needed_rows in range(1, max_wrap_rows + 1):
                 needed_cols = max(1, math.ceil(cells_per_row / needed_rows))
                 # ── Tier 1: region search ──────────────────────────────────
                 regions = list(getattr(grid, "regions", []) or [])
-                if regions:
-                    candidates: list[tuple[float, Any]] = []
-                    for rg in regions:
-                        if rg.row_end - rg.row_start + 1 < needed_rows:
-                            continue
-                        if rg.col_end - rg.col_start + 1 < needed_cols:
-                            continue
-                        cy = (rg.row_start + rg.row_end) / 2.0
-                        cx = (rg.col_start + rg.col_end) / 2.0
-                        dist = math.hypot(cy - anchor_row, cx - anchor_col)
-                        candidates.append((dist, rg))
-                    candidates.sort(key=lambda t: t[0])
-                    for _d, rg in candidates[: REMARK_SEARCH_RADIUS_RUNS]:
-                        carved = _v4_carve_subrect(
-                            rg, anchor_row, anchor_col, needed_rows, needed_cols, consumed
-                        )
-                        if carved:
-                            placed = carved
-                            tier = _TIER_REGION
-                            break
-                if placed:
-                    break
+                if not regions:
+                    continue
+                candidates: list[tuple[float, Any]] = []
+                for rg in regions:
+                    if rg.row_end - rg.row_start + 1 < needed_rows:
+                        continue
+                    if rg.col_end - rg.col_start + 1 < needed_cols:
+                        continue
+                    cy = (rg.row_start + rg.row_end) / 2.0
+                    cx = (rg.col_start + rg.col_end) / 2.0
+                    dist = math.hypot(cy - anchor_row, cx - anchor_col)
+                    candidates.append((dist, rg))
+                candidates.sort(key=lambda t: t[0])
+                for _d, rg in candidates[: REMARK_SEARCH_RADIUS_RUNS]:
+                    carved = _v4_carve_subrect(
+                        rg,
+                        anchor_row,
+                        anchor_col,
+                        needed_rows,
+                        needed_cols,
+                        consumed,
+                        grid_cols=grid_cols,
+                    )
+                    if carved is None:
+                        continue
+                    score, cells = carved
+                    # Bias against single-row placements that touch a margin —
+                    # makes a 2-row interior placement preferred even when a
+                    # 1-row strip is geometrically closer.
+                    if needed_rows == 1:
+                        rcs = [rc_from_cell_id(c) for c in cells]
+                        cs = [c for _, c in rcs]
+                        if grid_cols > 0 and (min(cs) <= 1 or max(cs) >= grid_cols):
+                            score += 2.5
+                    if best_global is None or score < best_global[0]:
+                        best_global = (score, cells)
+
+            if best_global is not None:
+                placed = best_global[1]
+                tier = _TIER_REGION
 
             # ── Tier 2: fall back to existing run-based logic ──────────────
             if not placed:
