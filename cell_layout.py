@@ -242,6 +242,12 @@ def _percent_box_to_range(
     return f"{a}:{b}" if a != b else a
 
 
+# NOTE: the live response transformer used by /analyse/smart-ocr lives in
+# src/cell_response_formatter.py (build_response_items). The functions below
+# (legacy adapter + invariant validator) are internal observation tooling for
+# the eval harness — they don't run in the request path.
+
+
 def adapt_v1_to_v2(response: dict[str, Any]) -> dict[str, Any]:
     """Convert a today-shape response into the v2 contract shape.
 

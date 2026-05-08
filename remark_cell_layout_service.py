@@ -605,6 +605,12 @@ def _v4_anchor_rc(grid: Any, x_pct: float, y_pct: float) -> tuple[int, int]:
     return row, col
 
 
+# Reject any tier-1/2 placement whose centroid drifts more than this many
+# rows from the annotation anchor. Prevents "fled to row 1 / row 35" when the
+# only writable regions on the page are at the page edges.
+MAX_ANCHOR_DRIFT_ROWS: int = max(2, _env_int("REMARK_MAX_ANCHOR_DRIFT_ROWS", 8))
+
+
 def _v4_carve_score(
     r0: int,
     c0: int,
@@ -657,10 +663,13 @@ def _v4_carve_subrect(
 
     row_options = list(range(max(r1, anchor_row - needed_rows + 1), r2 - needed_rows + 2))
     col_options = list(range(max(c1, anchor_col - needed_cols + 1), c2 - needed_cols + 2))
-    if not row_options:
-        row_options = [r1]
-    if not col_options:
-        col_options = [c1]
+    # If neither dimension can be placed within reach of the anchor we return
+    # None — the previous behaviour of falling back to (r1, c1) caused
+    # "fled to top of region" placements (rows 1, 35, etc.) when no writable
+    # region intersected the anchor's row/col band. Caller falls through to
+    # the next region or to tier-2.
+    if not row_options or not col_options:
+        return None
 
     best: tuple[float, list[str]] | None = None
     for r0 in row_options:
@@ -851,12 +860,19 @@ def assign_cell_ids_v4(
                     if carved is None:
                         continue
                     score, cells = carved
+                    # Hard distance cap — reject placements that drifted too far
+                    # from the anchor. Without this, sparse-writability pages
+                    # produce row-1 / row-N "fled to edge" placements.
+                    rcs = [rc_from_cell_id(c) for c in cells]
+                    rs = [r for r, _ in rcs]
+                    cs = [c for _, c in rcs]
+                    cy = (min(rs) + max(rs)) / 2.0
+                    if abs(cy - anchor_row) > MAX_ANCHOR_DRIFT_ROWS:
+                        continue
                     # Bias against single-row placements that touch a margin —
                     # makes a 2-row interior placement preferred even when a
                     # 1-row strip is geometrically closer.
                     if needed_rows == 1:
-                        rcs = [rc_from_cell_id(c) for c in cells]
-                        cs = [c for _, c in rcs]
                         if grid_cols > 0 and (min(cs) <= 1 or max(cs) >= grid_cols):
                             score += 2.5
                     if best_global is None or score < best_global[0]:
@@ -879,6 +895,17 @@ def assign_cell_ids_v4(
                         fontname=fontname,
                         excluded=consumed,
                     )
+                    if placed:
+                        # Tier 2 uses an older anchor-distance heuristic; apply
+                        # the same hard cap here so it can't flee to page edges.
+                        try:
+                            placed_rcs = [rc_from_cell_id(c) for c in placed]
+                            placed_rs = [r for r, _ in placed_rcs]
+                            cy = (min(placed_rs) + max(placed_rs)) / 2.0
+                            if abs(cy - anchor_row) > MAX_ANCHOR_DRIFT_ROWS:
+                                placed = []
+                        except ValueError:
+                            placed = []
                     if placed:
                         tier = _TIER_RUN
                 except Exception:
@@ -903,11 +930,24 @@ def assign_cell_ids_v4(
                     page_no, x0, x1_end, yp
                 )
             else:
-                # ── Tier 3: synth ──────────────────────────────────────────
-                ann["cell_ids"] = []
-                ann["range_id"] = ""
+                # ── Tier 3: synth bbox AND synthesise cell IDs from it ─────
+                # Always emit non-empty cell_ids — empty ranges break frontend
+                # rendering and downstream renderer adapters. Some synthesised
+                # cells may overlap handwriting; that's better than dropping
+                # the anchor entirely.
+                synth = _v4_synth_bbox(page_no, x0, x1_end, yp)
+                synth_cells_rc = _cells_in_rect(
+                    grid,
+                    x1_pct=float(synth["x1_percent"]),
+                    y1_pct=float(synth["y1_percent"]),
+                    x2_pct=float(synth["x2_percent"]),
+                    y2_pct=float(synth["y2_percent"]),
+                )
+                synth_cell_ids = [cell_id_from_rc(r, c) for r, c in synth_cells_rc]
+                ann["cell_ids"] = synth_cell_ids
+                ann["range_id"] = _v4_range_id(synth_cell_ids) if synth_cell_ids else ""
                 ann["placement_tier"] = _TIER_SYNTH
-                ann["bbox"] = _v4_synth_bbox(page_no, x0, x1_end, yp)
+                ann["bbox"] = synth
 
 
 def assign_cell_ids_to_annotations(

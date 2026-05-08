@@ -39,6 +39,7 @@ from remark_cell_layout_service import (
     REMARK_MAX_WRAP_ROWS,
     assign_cell_ids_v4,
 )
+from src.cell_response_formatter import build_response_items
 from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
@@ -1550,16 +1551,20 @@ async def post_analyse_smart_ocr(
                 fontname=remark_font,
                 max_wrap_rows=REMARK_MAX_WRAP_ROWS,
             )
+            # skipped_pages reads start_page/end_page off the placer's items;
+            # compute it BEFORE reshaping (the wire shape drops those fields).
+            skipped_pages_fail = _smart_ocr_skipped_pages(page_count, items)
+            response_items_fail = build_response_items(items, _grading_fail_grids)
             # Don't fail the whole response — return OCR items with error note
             return JSONResponse(
                 _ok(
                     "Smart OCR complete. Grading failed.",
                     pageCount=page_count,
-                    items=items,
+                    items=response_items_fail,
                     modelId=mid,
                     checkLevel=check_canon,
                     gradingError=str(e),
-                    skippedPages=_smart_ocr_skipped_pages(page_count, items),
+                    skippedPages=skipped_pages_fail,
                     cellGridMeta=cell_grid_meta_payload(_grading_fail_grids),
                 )
             )
@@ -1583,13 +1588,16 @@ async def post_analyse_smart_ocr(
     extra: dict = {"checkLevel": check_canon}
     if mid:
         extra["modelId"] = mid
+    # skipped_pages reads start_page/end_page off the placer's items;
+    # compute it BEFORE reshaping (the wire shape drops those fields).
     skipped_pages = _smart_ocr_skipped_pages(page_count, items)
+    response_items = build_response_items(items, page_grids)
 
     return JSONResponse(
         _ok(
             "Smart OCR complete.",
             pageCount=page_count,
-            items=items,
+            items=response_items,
             skippedPages=skipped_pages,
             cellGridMeta=cell_grid_meta_payload(page_grids),
             **extra,
