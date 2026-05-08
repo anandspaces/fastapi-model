@@ -117,3 +117,57 @@ def test_idempotent(pdf_bytes, grids_24pt):
     a = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=200)
     b = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=200)
     assert a == b
+
+
+# ── label_every_cell flag ─────────────────────────────────────────────────
+
+
+def test_label_every_cell_default_off(pdf_bytes, grids_24pt):
+    """Default render and label_every_cell=False produce the same bytes."""
+    default = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150)
+    explicit = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                                    label_every_cell=False)
+    assert default == explicit
+
+
+def test_label_every_cell_grows_payload(pdf_bytes, grids_24pt):
+    """Labelling non-writable cells too should produce visibly larger PNGs
+    (more glyphs in the raster). At 24-pt cells the increase is modest but
+    measurable on dense pages."""
+    base = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150)
+    full = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                                label_every_cell=True)
+    base_total = sum(len(p) for p in base)
+    full_total = sum(len(p) for p in full)
+    assert full_total > base_total, (
+        f"label_every_cell payload {full_total} not larger than base {base_total}"
+    )
+
+
+def test_label_every_cell_dense_grid_still_labels(pdf_bytes, grids_12pt):
+    """At 12-pt cells, base render skips per-cell labels (font < 4pt).
+    With label_every_cell=True, we override the threshold and label anyway —
+    payload must grow vs base."""
+    base = render_overlay_pngs(pdf_bytes, grids_12pt, dpi=150)
+    full = render_overlay_pngs(pdf_bytes, grids_12pt, dpi=150,
+                                label_every_cell=True)
+    base_total = sum(len(p) for p in base)
+    full_total = sum(len(p) for p in full)
+    assert full_total > base_total
+
+
+def test_label_every_cell_perf_24pt(pdf_bytes, grids_24pt):
+    """Per-page budget under label_every_cell=True at 24-pt cells. About 840
+    cells/page total → ~2× the writable-only label work, plus PNG encode.
+    Allow CI variance."""
+    font_path = str(FONT_FIXTURE) if FONT_FIXTURE.exists() else None
+    t0 = time.perf_counter()
+    pngs = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=200,
+                                label_font_path=font_path,
+                                label_every_cell=True)
+    elapsed_ms = 1000.0 * (time.perf_counter() - t0)
+    per_page = elapsed_ms / max(1, len(pngs))
+    # 24-pt every-cell at 200 DPI: standalone ~600 ms; CI ceiling 1100 ms.
+    assert per_page < 1100.0, (
+        f"label_every_cell 24-pt cells: {per_page:.0f} ms/page exceeds budget"
+    )

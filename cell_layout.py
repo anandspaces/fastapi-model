@@ -244,8 +244,80 @@ def _percent_box_to_range(
 
 # NOTE: the live response transformer used by /analyse/smart-ocr lives in
 # src/cell_response_formatter.py (build_response_items). The functions below
-# (legacy adapter + invariant validator) are internal observation tooling for
-# the eval harness — they don't run in the request path.
+# (prompt-side cell layout, legacy adapter, invariant validator) are
+# observation / prompt-feeding tooling — they don't transform the response.
+
+
+# ── Prompt-side spatial vocabulary ─────────────────────────────────────────
+
+
+def cell_layout_for_prompt(
+    grids: list[PageCellGrid],
+    *,
+    include_runs: bool = True,
+    include_regions: bool = True,
+) -> list[dict[str, Any]]:
+    """Compact per-page cell-layout description Gemini reads as the spatial
+    vocabulary for cell-ID-native annotation placement.
+
+    For each page emits:
+        { "page": N, "rows": R, "cols": C,
+          "writable_runs": ["A5:X5", "A6:X6", ...],   // truth source for comment_range
+          "regions":       ["A5:X9", "A22:X29"]       // largest free rectangles, hint only
+        }
+
+    Token budget. Runs are O(rows × density) per page; regions are O(32) max.
+    Measured on real PDFs:
+
+        cell_size_pts   pages   runs    regions   total chars   ~tokens
+        24              18       550      221       9 KB         2.4k
+        12              18      3479      576      48 KB        12.0k
+
+    For dense 12-pt grids the runs payload alone can rival the rest of the
+    grading call's input. Caller passes ``include_runs=False`` (regions only)
+    when the budget is tight; comments still place correctly because a
+    region IS a writable rectangle by construction.
+    """
+    out: list[dict[str, Any]] = []
+    for g in grids:
+        page_entry: dict[str, Any] = {
+            "page": int(g.page),
+            "rows": int(g.rows),
+            "cols": int(g.cols),
+        }
+        if include_runs:
+            page_entry["writable_runs"] = [
+                r.range_id for r in (getattr(g, "runs", None) or [])
+            ]
+        if include_regions:
+            page_entry["regions"] = [
+                rg.bbox_range_id for rg in (getattr(g, "regions", None) or [])
+            ]
+        out.append(page_entry)
+    return out
+
+
+# Heuristic budget for when runs become noise: if the per-call serialized
+# cell-layout would exceed this many characters, drop the per-row runs and
+# rely on regions alone. Roughly 1/4 the chars give the token estimate.
+CELL_LAYOUT_MAX_CHARS_BUDGET: int = 16000
+
+
+def cell_layout_for_prompt_budgeted(
+    grids: list[PageCellGrid],
+    *,
+    max_chars: int = CELL_LAYOUT_MAX_CHARS_BUDGET,
+) -> list[dict[str, Any]]:
+    """Auto-decide whether to include ``writable_runs`` based on budget.
+
+    First tries the full payload (runs + regions). If serialized > ``max_chars``,
+    falls back to regions only. Always returns a usable payload — never None.
+    """
+    import json
+    full = cell_layout_for_prompt(grids, include_runs=True, include_regions=True)
+    if len(json.dumps(full)) <= max_chars:
+        return full
+    return cell_layout_for_prompt(grids, include_runs=False, include_regions=True)
 
 
 def adapt_v1_to_v2(response: dict[str, Any]) -> dict[str, Any]:

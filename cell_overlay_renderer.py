@@ -40,6 +40,9 @@ GREEN_FILL = (0.78, 0.96, 0.78)
 GREEN_STROKE = (0.05, 0.55, 0.05)
 GRID_GRAY = (0.78, 0.78, 0.78)
 LABEL_COLOR = (0.05, 0.45, 0.05)
+# Used for non-writable cell labels under label_every_cell=True. Faint enough
+# to read against white but not fight handwriting in dark cells.
+NONWRITABLE_LABEL_COLOR = (0.40, 0.40, 0.40)
 AXIS_COLOR = (0.30, 0.30, 0.30)
 
 
@@ -77,12 +80,17 @@ def render_overlay_pngs(
     dpi: int = 200,
     label_font_path: str | None = None,
     show_axis_labels: bool = True,
+    label_every_cell: bool = False,
 ) -> list[bytes]:
     """Render one overlay PNG per page; returns bytes list in document order.
 
     Pages with no matching grid (e.g., a page outside the analyzer's range)
     are emitted as the original raster — caller can still rely on len(result)
     matching doc.page_count.
+
+    ``label_every_cell``: when True, non-writable cells also get their cell ID
+    drawn in faint gray. Used by the cell-overlay grading prompt where Gemini
+    must be able to read any cell ID (anchors land on handwriting cells).
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     by_page = {g.page: g for g in grids}
@@ -99,7 +107,8 @@ def render_overlay_pngs(
             grid = by_page.get(idx + 1)
             page = doc[idx]
             if grid is not None:
-                _draw_overlay(page, grid, label_font, show_axis_labels)
+                _draw_overlay(page, grid, label_font, show_axis_labels,
+                              label_every_cell=label_every_cell)
             pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0))
             out.append(pix.tobytes("png"))
     finally:
@@ -112,6 +121,8 @@ def _draw_overlay(
     grid: PageCellGrid,
     label_font: fitz.Font,
     show_axis_labels: bool,
+    *,
+    label_every_cell: bool = False,
 ) -> None:
     cs = grid.cell_size_pts
     left = grid.left_margin_pts
@@ -147,10 +158,14 @@ def _draw_overlay(
         )
         shape.commit()
 
-    # ── Layer 3: per-cell ID labels (one TextWriter commit) ────────────
-    # Skipped on dense grids where labels would be illegible (< 4pt font);
-    # axis labels in Layer 4 are the spatial reference in that case.
-    if writable_cells and _should_label_each_cell(cs):
+    # ── Layer 3a: writable cell ID labels (green) ──────────────────────
+    # Skipped on dense grids where labels would be illegible (< 4pt font),
+    # UNLESS label_every_cell forces them on (the cell-overlay grading prompt
+    # needs every cell ID readable regardless of cell size).
+    label_writable = writable_cells and (
+        label_every_cell or _should_label_each_cell(cs)
+    )
+    if label_writable:
         tw = fitz.TextWriter(page.rect, color=LABEL_COLOR)
         for cell in writable_cells:
             tw.append(
@@ -160,6 +175,23 @@ def _draw_overlay(
                 fontsize=label_size,
             )
         tw.write_text(page)
+
+    # ── Layer 3b: non-writable cell labels (faint gray) ────────────────
+    # Off by default. Enabled by label_every_cell so Gemini can reference
+    # any cell ID (e.g. for anchor.rows on handwriting cells). One additional
+    # TextWriter commit per page.
+    if label_every_cell:
+        non_writable = [c for c in grid.cells if not c.writable]
+        if non_writable:
+            tw_nw = fitz.TextWriter(page.rect, color=NONWRITABLE_LABEL_COLOR)
+            for cell in non_writable:
+                tw_nw.append(
+                    fitz.Point(cell.pdf_x1 + 1.0, cell.pdf_y1 + label_size + 0.5),
+                    cell.cell_id,
+                    font=label_font,
+                    fontsize=label_size,
+                )
+            tw_nw.write_text(page)
 
     # ── Layer 4: axis labels (cheap O(rows + cols)) ────────────────────
     if show_axis_labels:
@@ -198,6 +230,8 @@ def _cli() -> int:
     p.add_argument("--font", default=None,
                    help="TTF for cell labels (defaults to PyMuPDF helv)")
     p.add_argument("--no-axis", action="store_true")
+    p.add_argument("--label-every-cell", action="store_true",
+                   help="Label non-writable cells too (for cell-overlay grading prompt)")
     args = p.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -221,6 +255,7 @@ def _cli() -> int:
         dpi=args.dpi,
         label_font_path=args.font,
         show_axis_labels=not args.no_axis,
+        label_every_cell=args.label_every_cell,
     )
     t_render = time.perf_counter() - t0
 

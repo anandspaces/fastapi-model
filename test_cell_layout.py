@@ -19,6 +19,8 @@ from cell_layout import (
     _expand_range,
     _range_bounds,
     _rects_overlap,
+    cell_layout_for_prompt,
+    cell_layout_for_prompt_budgeted,
     validate,
 )
 
@@ -275,3 +277,120 @@ def test_envelope_or_inner_dict():
     b = validate(inner, [grid])
     assert sum(a.counts.values()) == sum(b.counts.values()) == 0
     assert a.annotations_total == b.annotations_total == 1
+
+
+# ── cell_layout_for_prompt ─────────────────────────────────────────────────
+
+
+@dataclass
+class FakeRun:
+    range_id: str
+
+
+@dataclass
+class FakeRegion:
+    bbox_range_id: str
+
+
+def _grid_with_runs_regions(page=2, rows=35, cols=24,
+                             runs=None, regions=None):
+    g = _build_fake_grid(page=page, rows=rows, cols=cols)
+    g.runs = runs or []
+    g.regions = regions or []
+    return g
+
+
+def test_cell_layout_for_prompt_empty():
+    assert cell_layout_for_prompt([]) == []
+
+
+def test_cell_layout_for_prompt_shape():
+    g = _grid_with_runs_regions(
+        page=3, rows=35, cols=24,
+        runs=[FakeRun("A5:X5"), FakeRun("A6:X6")],
+        regions=[FakeRegion("A5:X9"), FakeRegion("A22:X29")],
+    )
+    out = cell_layout_for_prompt([g])
+    assert out == [{
+        "page": 3, "rows": 35, "cols": 24,
+        "writable_runs": ["A5:X5", "A6:X6"],
+        "regions": ["A5:X9", "A22:X29"],
+    }]
+
+
+def test_cell_layout_for_prompt_missing_runs_regions_ok():
+    """A grid with no runs / no regions still emits an entry with empty arrays."""
+    g = _grid_with_runs_regions(page=1)
+    out = cell_layout_for_prompt([g])
+    assert out[0]["writable_runs"] == []
+    assert out[0]["regions"] == []
+    assert out[0]["page"] == 1
+
+
+def test_cell_layout_for_prompt_token_budget():
+    """Sanity-check the size on a worst-case dense grid (35 rows, 24 cols,
+    every row a writable run). Stays under 2k chars per page so an 18-page
+    PDF fits comfortably in Gemini's input limit."""
+    runs = [FakeRun(f"A{r}:X{r}") for r in range(1, 36)]
+    regions = [FakeRegion(f"A{r}:X{r+2}") for r in (1, 5, 10, 15, 20, 25, 30)]
+    g = _grid_with_runs_regions(runs=runs, regions=regions)
+    import json
+    serialized = json.dumps(cell_layout_for_prompt([g]))
+    # 35 runs × ~7 chars each + 7 regions × ~10 chars + envelope ≈ 350-450 chars
+    assert len(serialized) < 2000, f"per-page payload {len(serialized)} chars"
+
+
+def test_cell_layout_for_prompt_multipage():
+    g1 = _grid_with_runs_regions(page=1, runs=[FakeRun("A1:X1")])
+    g2 = _grid_with_runs_regions(page=2, runs=[FakeRun("B5:M5")])
+    out = cell_layout_for_prompt([g1, g2])
+    assert [p["page"] for p in out] == [1, 2]
+    assert out[0]["writable_runs"] == ["A1:X1"]
+    assert out[1]["writable_runs"] == ["B5:M5"]
+
+
+def test_cell_layout_for_prompt_range_ids_parseable():
+    """Every emitted range ID round-trips through the same parser the
+    validator uses — guards against accidental shape drift."""
+    g = _grid_with_runs_regions(
+        runs=[FakeRun("AA12:AC15"), FakeRun("D2:D2")],
+        regions=[FakeRegion("Z1:Z35")],
+    )
+    out = cell_layout_for_prompt([g])
+    for rid in out[0]["writable_runs"] + out[0]["regions"]:
+        # _range_bounds raises on malformed input
+        _range_bounds(rid)
+
+
+def test_cell_layout_for_prompt_include_flags():
+    g = _grid_with_runs_regions(
+        runs=[FakeRun("A5:X5")], regions=[FakeRegion("A5:X9")],
+    )
+    runs_only = cell_layout_for_prompt([g], include_regions=False)
+    assert "writable_runs" in runs_only[0]
+    assert "regions" not in runs_only[0]
+
+    regions_only = cell_layout_for_prompt([g], include_runs=False)
+    assert "writable_runs" not in regions_only[0]
+    assert "regions" in regions_only[0]
+
+
+def test_cell_layout_for_prompt_budgeted_under_budget_keeps_runs():
+    """Small payload → full layout (runs + regions) returned."""
+    g = _grid_with_runs_regions(
+        runs=[FakeRun("A5:X5"), FakeRun("A6:X6")],
+        regions=[FakeRegion("A5:X9")],
+    )
+    out = cell_layout_for_prompt_budgeted([g], max_chars=10_000)
+    assert "writable_runs" in out[0]
+    assert "regions" in out[0]
+
+
+def test_cell_layout_for_prompt_budgeted_over_budget_drops_runs():
+    """Large payload → falls back to regions only."""
+    runs = [FakeRun(f"A{r}:AZ{r}") for r in range(1, 100)]
+    regions = [FakeRegion(f"A{r}:AZ{r+2}") for r in (1, 50, 99)]
+    g = _grid_with_runs_regions(runs=runs, regions=regions)
+    out = cell_layout_for_prompt_budgeted([g], max_chars=200)
+    assert "writable_runs" not in out[0]
+    assert out[0]["regions"] == [r.bbox_range_id for r in regions]
