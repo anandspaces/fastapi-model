@@ -11,16 +11,36 @@ natural tick marks, curved arrows, curly braces, exponent carets — with remark
 text in Homemade Apple handwriting font. Output looks like a human teacher
 checked the paper with a red pen.
 
-**Previous scripts (now consolidated):**
+**Status: BUILT** — `teacher_annotate.py` (1100 LOC) + `test_teacher_annotate.py` (regression suite, 14 tests, all passing).
+
+**Predecessor scripts (kept on disk for reference, not used by the new pipeline):**
 
 | Old File | What It Did | Status |
 |---|---|---|
-| `annotate_pdf_final.py` | Drawing primitives + CLI | ✅ Absorbed |
-| `free_space_detector.py` | CV free-space analysis (3 techniques) | ✅ Absorbed |
-| `pdf_region_annotator.py` | Connected-component writable regions | ✅ Absorbed |
-| `cell_grid_service.py` | Rigid 25pt cell grid (deprecated) | ❌ Replaced |
+| `annotate_pdf_final.py` | Drawing primitives + CLI | 📚 Reference (kept) |
+| `free_space_detector.py` | CV free-space analysis (3 techniques) | 📚 Reference (kept) |
+| `pdf_region_annotator.py` | Connected-component writable regions | 📚 Reference (kept) |
+| `cell_grid_service.py` | Rigid 25pt cell grid (deprecated) | ❌ Don't use |
 
 **Everything now lives in one file: `teacher_annotate.py`**
+
+### Currently Implemented vs Deferred
+
+| Feature | Status |
+|---|---|
+| 3 CV free-space techniques (strips, word gaps, free rects) | ✅ Done |
+| All 6 drawing primitives | ✅ Done |
+| ProximityLayout with **pre-seeded** occupied slots | ✅ Done (BUG FIX applied) |
+| `wavy_underline` band ceiling clamp | ✅ Done (BUG FIX applied) |
+| `organic_arrow` control-point free-band routing | ✅ Done (BUG FIX applied) |
+| `place_in_gap` text wrapping | ✅ Done (BUG FIX applied) |
+| `RemarkResolver` with auto / auto_line / auto_gap | ✅ Done |
+| `remark_zone="gap"` → `right_margin` fallback | ✅ Done |
+| `--scaffold-dense` (auto-fill placement stress test) | ✅ Done |
+| `--analyze-only` (layout JSON without rendering) | ✅ Done |
+| `WritableRegion` connected-component labeling | ⏸ Deferred (current 3 techniques + pre-seeded ProximityLayout proved sufficient) |
+| Multi-line underline (`x_start2`/`x_end2`) | ✅ Done |
+| Frontend JSON-coordinate output | ⏸ Deferred (current pipeline writes annotated PDF; structured coord export is a future flag) |
 
 ---
 
@@ -45,22 +65,60 @@ data/                             ← any additional test assets
 ## CLI Usage
 
 ```bash
-# Annotate a PDF
-python3 teacher_annotate.py input.pdf remarks.json output.pdf [--dpi 250]
+# Annotate a PDF (real flow)
+python3 teacher_annotate.py input.pdf remarks.json output.pdf --dpi 250
 
-# Analyse free space only — no annotation, prints layout JSON
+# Analyse free space only — prints layout JSON to stdout
 python3 teacher_annotate.py input.pdf --analyze-only
 
-# Generate a pre-filled remarks.json template from detected layout
-python3 teacher_annotate.py input.pdf --scaffold > remarks_template.json
-
-# Debug flags
-python3 teacher_annotate.py input.pdf remarks.json output.pdf \
-    --dpi 250 \
-    --debug-layout \      # print LayoutMap summary per page to stdout
-    --debug-freespace \   # save freespace overlay PDF alongside output
-    --quiet               # suppress all stdout except errors
+# Generate dense auto-filled remarks JSON (placement stress test)
+python3 teacher_annotate.py input.pdf --scaffold-dense > dense.json
+python3 teacher_annotate.py input.pdf dense.json out_dense.pdf --dpi 250
 ```
+
+All progress logs go to stderr; stdout is reserved for JSON output of the
+`--analyze-only` and `--scaffold-dense` modes so they pipe cleanly.
+
+---
+
+## Function Index — `teacher_annotate.py`
+
+Quick lookup of where each piece lives in the actual file (line numbers approximate, search for the section header):
+
+| Function / Class | Section | Purpose |
+|---|---|---|
+| `_color_for(severity)` | §1 | severity → RGB |
+| `GapInfo`, `FreeStrip`, `WordGap`, `FreeRect`, `LayoutMap`, `ResolvedRemark` | §2 | dataclasses |
+| `LayoutMap.line_y(n)` | §2 | safe 1-indexed line lookup |
+| `LayoutMap.best_gap_for_line(line)` | §2 | gap within ±5 lines |
+| `LayoutMap.best_score_position()` | §2 | top-right free rect |
+| `load_pdf_pages_pil(pdf, dpi)` | §3 | PyMuPDF rasterise |
+| `detect_lines(gray, dpi)` | §4 | CC centroid clustering |
+| `detect_gaps(line_ys, H, lh, min_gap)` | §4 | inter-line bands |
+| `detect_strips(...)` | §4 | Technique 1 — morph dilation |
+| `detect_word_gaps(...)` | §4 | Technique 2 — column projection |
+| `detect_free_rects(...)` | §4 | Technique 3 — Canny + contours |
+| `build_layout_map(pil_img, page, dpi)` | §4 | runs ALL detectors once |
+| `find_ink_top` / `find_ink_bottom` | §5 | row-projection ink edges |
+| `snap_to_word_boundaries(...)` | §5 | expand x range to word edges |
+| `snap_exponent_gap(layout, line, x)` | §5 | nearest word gap |
+| `wavy_underline(arr, gray, ...)` | §6 | ink-bottom-following wave (BUG FIX: y_bot ceiling) |
+| `organic_ellipse(arr, cx, cy, rx, ry, ...)` | §6 | wobbly hand-drawn oval |
+| `natural_tick(arr, cx, cy, size, ...)` | §6 | two Bezier strokes |
+| `_free_band_centre(bands, lo, hi)` | §6 | overlap-best free band |
+| `organic_arrow(arr, sx, sy, dx, dy, ..., free_bands)` | §6 | Bezier arrow (BUG FIX: snaps cpy through free band) |
+| `curly_brace(arr, y_top, y_bot, bx, side, ...)` | §6 | cubic Bezier { or } |
+| `exponent_caret(arr, cx, caret_y, ...)` | §6 | ^ insertion mark |
+| `paste_hw(layer, text, x, y, sz, color)` | §7 | render Homemade Apple |
+| `ProximityLayout(layout)` | §7 | non-overlap text slots (BUG FIX: pre-seeded with occupied ranges) |
+| `place_in_gap(layer, text, gap, body_l, body_r, sz, color)` | §7 | wrap + centre in gap (BUG FIX: now wraps) |
+| `RemarkResolver(layout).resolve_all(raw)` | §8 | JSON → ResolvedRemark |
+| `_free_bands_for_arrows(layout)` | §9 | union of strips + gaps for routing |
+| `draw_page(pil_img, resolved, layout)` | §9 | dispatch loop |
+| `_DENSE_GAP_REMARKS`, `_DENSE_MARGIN_REMARKS` | §10 | pre-canned text pool |
+| `scaffold_dense(layout)` | §10 | auto-generates dense remark spec |
+| `process_pdf(pdf_in, remarks, pdf_out, dpi, *, dense, analyze_only)` | §10 | top-level pipeline |
+| `_cli()` | §11 | argparse, dispatches to process_pdf |
 
 ---
 

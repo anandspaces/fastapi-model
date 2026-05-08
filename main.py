@@ -1503,7 +1503,7 @@ async def post_analyse_smart_ocr(
     )
 
     # Cell grid analysis runs concurrently with Stage 3 grading (when modelId set).
-    grid_task = asyncio.create_task(asyncio.to_thread(analyze_pdf_cell_grid, raw))
+    grid_task = asyncio.create_task(asyncio.to_thread(analyze_pdf_cell_grid, raw, dpi=250))
     remark_font = REMARK_FONTNAME_HI if lang == "hi" else REMARK_FONTNAME_EN
 
     # --- Stage 3: grading (only when modelId provided) ---

@@ -1,0 +1,135 @@
+{
+  "pages": [
+    {
+      "page": 1,
+      "remarks": [
+        {
+          "type": "score_circle",
+          "cx": 72.92,
+          "cy_line": 1,
+          "text": "7/10",
+          "severity": "critical"
+        },
+        {
+          "type": "tick",
+          "line": 1,
+          "zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 13,
+          "x_start": 16,
+          "x_end": 60,
+          "remark": "Logical inconsistency. This claim contradicts the opening argument and weakens the overall thesis.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "circle_remark",
+          "line": 21,
+          "x_start": 16,
+          "x_end": 60,
+          "remark": "Critical factual error. Verify against authoritative sources before final submission.",
+          "remark_zone": "gap",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 2,
+          "x_start": 14,
+          "x_end": 65,
+          "remark": "Lacks comparative perspective. Add at least one counter-argument.",
+          "remark_zone": "right_margin",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 5,
+          "x_start": 14,
+          "x_end": 65,
+          "remark": "Use precise UPSC terminology \u2014 'sovereignty', not 'authority'.",
+          "remark_zone": "right_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 22,
+          "x_start": 14,
+          "x_end": 65,
+          "remark": "Add data, year, or quantitative anchor.",
+          "remark_zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "exponent_insert",
+          "line": 4,
+          "x_pct": "auto_gap",
+          "text": "(cite?)",
+          "severity": "suggestion"
+        }
+      ]
+    },
+    {
+      "page": 2,
+      "remarks": [
+        {
+          "type": "score_circle",
+          "cx": 69.15,
+          "cy_line": 3,
+          "text": "7/10",
+          "severity": "critical"
+        },
+        {
+          "type": "tick",
+          "line": 1,
+          "zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 3,
+          "x_start": 16,
+          "x_end": 60,
+          "remark": "Logical inconsistency. This claim contradicts the opening argument and weakens the overall thesis.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "circle_remark",
+          "line": 17,
+          "x_start": 16,
+          "x_end": 60,
+          "remark": "Critical factual error. Verify against authoritative sources before final submission.",
+          "remark_zone": "gap",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 18,
+          "x_start": 16,
+          "x_end": 60,
+          "remark": "Argument lacks depth. Add socio-economic dimensions and supporting data.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 4,
+          "x_start": 14,
+          "x_end": 65,
+          "remark": "Argument incomplete. Address the second half of the question.",
+          "remark_zone": "left_margin",
+          "severity": "suggestion"
+        },
+        {
+          "type": "exponent_insert",
+          "line": 4,
+          "x_pct": "auto_gap",
+          "text": "(cite?)",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ]
+}
