@@ -51,6 +51,14 @@ AXIS_COLOR = (0.30, 0.30, 0.30)
 # raster at 200 DPI; axis labels alone are then the spatial reference.
 MIN_CELL_LABEL_SIZE_PTS: float = 4.0
 
+# Absolute floor — even label_every_cell skips below this size because no DPI
+# can rescue 2pt glyphs.
+ABS_MIN_CELL_LABEL_SIZE_PTS: float = 3.0
+
+# JPEG output defaults. q-85 is the sweet spot for grid overlays — labels stay
+# crisp, payload drops 3-5× vs PNG at the same DPI.
+DEFAULT_JPEG_QUALITY: int = 85
+
 
 def _label_font_size_pts(cell_size_pts: float) -> float:
     return max(2.4, min(6.0, cell_size_pts * 0.30))
@@ -81,8 +89,10 @@ def render_overlay_pngs(
     label_font_path: str | None = None,
     show_axis_labels: bool = True,
     label_every_cell: bool = False,
+    image_format: str = "png",
+    jpeg_quality: int = DEFAULT_JPEG_QUALITY,
 ) -> list[bytes]:
-    """Render one overlay PNG per page; returns bytes list in document order.
+    """Render one overlay image per page; returns bytes list in document order.
 
     Pages with no matching grid (e.g., a page outside the analyzer's range)
     are emitted as the original raster — caller can still rely on len(result)
@@ -91,7 +101,18 @@ def render_overlay_pngs(
     ``label_every_cell``: when True, non-writable cells also get their cell ID
     drawn in faint gray. Used by the cell-overlay grading prompt where Gemini
     must be able to read any cell ID (anchors land on handwriting cells).
+
+    ``image_format``: ``"png"`` (default, lossless) or ``"jpeg"``. JPEG q-85
+    cuts payload 3-5× with no visible label degradation at ≥ 150 DPI — use it
+    for the grading-prompt path where total upload size matters.
+
+    ``jpeg_quality``: 1-100, only used when ``image_format='jpeg'``. Defaults
+    to ``DEFAULT_JPEG_QUALITY`` (85).
     """
+    fmt = image_format.lower()
+    if fmt not in ("png", "jpeg", "jpg"):
+        raise ValueError(f"image_format must be 'png' or 'jpeg', got {image_format!r}")
+
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     by_page = {g.page: g for g in grids}
 
@@ -110,7 +131,10 @@ def render_overlay_pngs(
                 _draw_overlay(page, grid, label_font, show_axis_labels,
                               label_every_cell=label_every_cell)
             pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0))
-            out.append(pix.tobytes("png"))
+            if fmt == "png":
+                out.append(pix.tobytes("png"))
+            else:
+                out.append(pix.tobytes("jpeg", jpg_quality=int(jpeg_quality)))
     finally:
         doc.close()
     return out
@@ -161,9 +185,12 @@ def _draw_overlay(
     # ── Layer 3a: writable cell ID labels (green) ──────────────────────
     # Skipped on dense grids where labels would be illegible (< 4pt font),
     # UNLESS label_every_cell forces them on (the cell-overlay grading prompt
-    # needs every cell ID readable regardless of cell size).
-    label_writable = writable_cells and (
-        label_every_cell or _should_label_each_cell(cs)
+    # needs every cell ID readable regardless of cell size). Even with that
+    # override, the absolute floor (~3pt) cannot be rescued by any DPI.
+    label_writable = (
+        writable_cells
+        and label_size >= ABS_MIN_CELL_LABEL_SIZE_PTS
+        and (label_every_cell or _should_label_each_cell(cs))
     )
     if label_writable:
         tw = fitz.TextWriter(page.rect, color=LABEL_COLOR)
@@ -179,8 +206,9 @@ def _draw_overlay(
     # ── Layer 3b: non-writable cell labels (faint gray) ────────────────
     # Off by default. Enabled by label_every_cell so Gemini can reference
     # any cell ID (e.g. for anchor.rows on handwriting cells). One additional
-    # TextWriter commit per page.
-    if label_every_cell:
+    # TextWriter commit per page. Skipped below the absolute illegibility
+    # floor — sub-3pt glyphs can't be rescued.
+    if label_every_cell and label_size >= ABS_MIN_CELL_LABEL_SIZE_PTS:
         non_writable = [c for c in grid.cells if not c.writable]
         if non_writable:
             tw_nw = fitz.TextWriter(page.rect, color=NONWRITABLE_LABEL_COLOR)
@@ -232,6 +260,10 @@ def _cli() -> int:
     p.add_argument("--no-axis", action="store_true")
     p.add_argument("--label-every-cell", action="store_true",
                    help="Label non-writable cells too (for cell-overlay grading prompt)")
+    p.add_argument("--format", default="png", choices=("png", "jpeg"),
+                   help="Image format. JPEG is 3-5× smaller; use for upload payloads.")
+    p.add_argument("--jpeg-quality", type=int, default=DEFAULT_JPEG_QUALITY,
+                   help="JPEG quality 1-100 (only used when --format=jpeg)")
     args = p.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -249,28 +281,33 @@ def _cli() -> int:
     t_grid = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    pngs = render_overlay_pngs(
+    images = render_overlay_pngs(
         pdf_bytes,
         grids,
         dpi=args.dpi,
         label_font_path=args.font,
         show_axis_labels=not args.no_axis,
         label_every_cell=args.label_every_cell,
+        image_format=args.format,
+        jpeg_quality=args.jpeg_quality,
     )
     t_render = time.perf_counter() - t0
 
-    for i, png in enumerate(pngs, start=1):
-        (out_dir / f"page_{i:03d}.png").write_bytes(png)
+    ext = "jpg" if args.format == "jpeg" else "png"
+    for i, img in enumerate(images, start=1):
+        (out_dir / f"page_{i:03d}.{ext}").write_bytes(img)
 
     n_writable = sum(sum(1 for c in g.cells if c.writable) for g in grids)
-    n_pages = len(pngs)
+    n_pages = len(images)
     avg_ms = 1000.0 * t_render / max(1, n_pages)
+    total_kb = sum(len(b) for b in images) // 1024
     print(
         f"grid={t_grid:.2f}s  render={t_render:.2f}s  "
-        f"pages={n_pages}  writable_cells={n_writable}  avg={avg_ms:.1f} ms/page",
+        f"pages={n_pages}  writable_cells={n_writable}  avg={avg_ms:.1f} ms/page  "
+        f"total={total_kb} KB",
         file=sys.stderr,
     )
-    print(f"wrote {n_pages} PNGs → {out_dir}/", file=sys.stderr)
+    print(f"wrote {n_pages} {args.format.upper()}s → {out_dir}/", file=sys.stderr)
     return 0
 
 

@@ -57,6 +57,10 @@ def _looks_like_png(buf: bytes) -> bool:
     return len(buf) > 24 and buf[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def _looks_like_jpeg(buf: bytes) -> bool:
+    return len(buf) > 4 and buf[:3] == b"\xff\xd8\xff"
+
+
 def test_label_size_threshold():
     # 12-pt cells → 3.6pt label → below threshold → no per-cell labels
     assert _label_font_size_pts(12.0) < MIN_CELL_LABEL_SIZE_PTS
@@ -154,6 +158,59 @@ def test_label_every_cell_dense_grid_still_labels(pdf_bytes, grids_12pt):
     base_total = sum(len(p) for p in base)
     full_total = sum(len(p) for p in full)
     assert full_total > base_total
+
+
+# ── JPEG output ────────────────────────────────────────────────────────────
+
+
+def test_jpeg_format_valid_bytes(pdf_bytes, grids_24pt):
+    pngs = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                                image_format="jpeg")
+    assert len(pngs) == len(grids_24pt)
+    for buf in pngs:
+        assert _looks_like_jpeg(buf)
+
+
+def test_jpeg_smaller_than_png(pdf_bytes, grids_24pt):
+    """JPEG q-85 must be materially smaller than PNG on grid overlays."""
+    png = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                               image_format="png")
+    jpg = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                               image_format="jpeg", jpeg_quality=85)
+    png_total = sum(len(b) for b in png)
+    jpg_total = sum(len(b) for b in jpg)
+    ratio = png_total / max(1, jpg_total)
+    # Conservative ceiling — base render compresses well as PNG, so the gap
+    # is narrowest in the no-label-every-cell case. The label_every_cell
+    # case drops payload 3-5× (covered by the next test).
+    assert ratio >= 1.5, f"JPEG/PNG ratio {ratio:.2f} — JPEG should be ≥1.5× smaller"
+
+
+def test_jpeg_compression_wins_with_label_every_cell(pdf_bytes, grids_24pt):
+    """The actual production use case (cell-overlay grading prompt) renders
+    label_every_cell=True. JPEG should cut payload ≥3× there because every
+    extra glyph blows up PNG's lossless cost."""
+    png = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                               image_format="png", label_every_cell=True)
+    jpg = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                               image_format="jpeg", label_every_cell=True,
+                               jpeg_quality=85)
+    ratio = sum(len(b) for b in png) / max(1, sum(len(b) for b in jpg))
+    assert ratio >= 3.0, f"label_every_cell JPEG/PNG ratio {ratio:.2f} — expected ≥3×"
+
+
+def test_jpeg_with_label_every_cell(pdf_bytes, grids_24pt):
+    """Combined: label_every_cell + JPEG renders cleanly."""
+    bufs = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
+                                image_format="jpeg", label_every_cell=True)
+    for buf in bufs:
+        assert _looks_like_jpeg(buf)
+
+
+def test_invalid_image_format_rejected(pdf_bytes, grids_24pt):
+    import pytest as _p
+    with _p.raises(ValueError):
+        render_overlay_pngs(pdf_bytes, grids_24pt, image_format="webp")
 
 
 def test_label_every_cell_perf_24pt(pdf_bytes, grids_24pt):
