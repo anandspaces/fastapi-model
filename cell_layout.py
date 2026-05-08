@@ -564,28 +564,41 @@ def validate(
                 continue
             atype = anchor.get("type") or "none"
             arange = anchor.get("range")
+            arows = anchor.get("rows")
             extra = anchor.get("extra") or {}
 
-            if atype != "none" and isinstance(arange, str) and arange:
-                try:
-                    a_cells = _expand_range(arange)
-                except ValueError as exc:
-                    tel.add(ViolationRecord(
-                        invariant="I3",
-                        page=grid.page,
-                        item_index=ii,
-                        annotation_index=ai,
-                        detail=f"unparseable anchor.range: {exc}",
-                    ))
-                    a_cells = []
-                a_oob = _check_cells_in_grid(a_cells, grid)
+            # Two source shapes for anchor cells:
+            #  - new wire shape: anchor.rows = ["B25:G25", "B26:G26"]
+            #  - legacy:        anchor.range = "B25:G25"
+            anchor_ranges: list[str] = []
+            if isinstance(arows, list) and arows:
+                anchor_ranges = [str(r) for r in arows]
+            elif isinstance(arange, str) and arange:
+                anchor_ranges = [arange]
+
+            if atype != "none" and anchor_ranges:
+                a_cells: list[tuple[int, int]] = []
+                bad_parse = False
+                for r in anchor_ranges:
+                    try:
+                        a_cells.extend(_expand_range(r))
+                    except ValueError as exc:
+                        bad_parse = True
+                        tel.add(ViolationRecord(
+                            invariant="I3",
+                            page=grid.page,
+                            item_index=ii,
+                            annotation_index=ai,
+                            detail=f"unparseable anchor range {r!r}: {exc}",
+                        ))
+                a_oob = _check_cells_in_grid(a_cells, grid) if not bad_parse else []
                 if a_oob:
                     tel.add(ViolationRecord(
                         invariant="I3",
                         page=grid.page,
                         item_index=ii,
                         annotation_index=ai,
-                        detail=f"anchor.range cells out of grid: {a_oob[:3]}",
+                        detail=f"anchor cells out of grid: {a_oob[:3]}",
                     ))
 
             if atype == "exponent_caret":

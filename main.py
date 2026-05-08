@@ -39,6 +39,7 @@ from remark_cell_layout_service import (
     REMARK_MAX_WRAP_ROWS,
     assign_cell_ids_v4,
 )
+from cell_layout import validate as validate_cell_layout
 from cell_overlay_renderer import render_overlay_pngs
 from src.cell_response_formatter import build_response_items
 from src.gemini_smart_ocr import smart_ocr_extract_student_answers
@@ -1626,6 +1627,28 @@ async def post_analyse_smart_ocr(
     # compute it BEFORE reshaping (the wire shape drops those fields).
     skipped_pages = _smart_ocr_skipped_pages(page_count, items)
     response_items = build_response_items(items, page_grids)
+
+    # Observe-only validation pass — counts I1–I9 invariant violations on
+    # the wire shape so we can measure cell-quality drift over time without
+    # mutating the response. Repair logic lands once telemetry shows where
+    # the prompt actually misbehaves.
+    try:
+        tel = validate_cell_layout(
+            {"data": {"items": response_items}}, page_grids,
+        )
+        if sum(tel.counts.values()) > 0:
+            log.info(
+                "analyse/smart-ocr cell-layout invariants request_id=%s "
+                "annotations=%s violations=%s counts=%s",
+                rid, tel.annotations_total,
+                sum(tel.counts.values()),
+                dict(tel.counts),
+            )
+    except Exception as val_exc:
+        log.warning(
+            "analyse/smart-ocr validator pass failed request_id=%s: %s",
+            rid, val_exc,
+        )
 
     return JSONResponse(
         _ok(

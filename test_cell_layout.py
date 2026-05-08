@@ -349,6 +349,36 @@ def test_cell_layout_for_prompt_multipage():
     assert out[1]["writable_runs"] == ["B5:M5"]
 
 
+def test_anchor_rows_list_detected_out_of_grid():
+    """The wire shape uses anchor.rows[] (list of row ranges) instead of
+    legacy anchor.range (single string). Validator handles both."""
+    grid = _build_fake_grid(rows=10, cols=10)
+    resp = _clean_response(grid)
+    resp["data"]["items"][0]["annotations"][0]["comment_range"] = "C3:D4"
+    resp["data"]["items"][0]["marking"] = {"page": grid.page,
+                                            "score_range": "B2:C3",
+                                            "score_box_range": "A1:D4"}
+    # rows[]-shaped anchor with one entry out of grid
+    resp["data"]["items"][0]["annotations"][0]["anchor"] = {
+        "type": "underline",
+        "rows": ["B7:G7", "A20:Z20"],   # second row way out of grid
+    }
+    tel = validate(resp, [grid])
+    assert _count(tel, "I3") >= 1
+
+
+def test_anchor_rows_list_clean_passes():
+    """rows[]-shaped anchor with all cells in-grid should not fire I3."""
+    grid = _build_fake_grid()
+    resp = _clean_response(grid)
+    resp["data"]["items"][0]["annotations"][0]["anchor"] = {
+        "type": "underline",
+        "rows": ["B7:G7", "B8:G8"],
+    }
+    tel = validate(resp, [grid])
+    assert _count(tel, "I3") == 0
+
+
 def test_cell_layout_for_prompt_range_ids_parseable():
     """Every emitted range ID round-trips through the same parser the
     validator uses — guards against accidental shape drift."""
