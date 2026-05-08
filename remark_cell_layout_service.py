@@ -583,6 +583,281 @@ def assign_bboxes_to_annotations(
             ann["bbox"] = bbox  # always set; never absent
 
 
+# ── v4 (region-aware) cell-id placement ──────────────────────────────────────
+
+
+_TIER_REGION = 1
+_TIER_RUN = 2
+_TIER_SYNTH = 3
+
+
+def _v4_anchor_rc(grid: Any, x_pct: float, y_pct: float) -> tuple[int, int]:
+    """1-based (row, col) of the cell containing the anchor (clamped)."""
+    cs = float(grid.cell_size_pts)
+    page_w = float(grid.page_w_pts)
+    page_h = float(grid.page_h_pts)
+    x_pts = max(0.0, min(page_w, (x_pct / 100.0) * page_w))
+    y_pts = max(0.0, min(page_h, (y_pct / 100.0) * page_h))
+    col = int((x_pts - grid.left_margin_pts) / cs) + 1
+    row = int((y_pts - grid.top_margin_pts) / cs) + 1
+    col = max(1, min(int(grid.cols), col))
+    row = max(1, min(int(grid.rows), row))
+    return row, col
+
+
+def _v4_carve_subrect(
+    region: Any,
+    anchor_row: int,
+    anchor_col: int,
+    needed_rows: int,
+    needed_cols: int,
+    consumed: set[tuple[int, int]],
+) -> list[str] | None:
+    """Pick a ``needed_rows × needed_cols`` block from ``region`` near the anchor.
+
+    Returns ordered cell-id list (left→right, top→bottom) or ``None`` if no
+    sub-rect both fits inside the region and avoids ``consumed``.
+    """
+    r1 = region.row_start
+    r2 = region.row_end
+    c1 = region.col_start
+    c2 = region.col_end
+    if r2 - r1 + 1 < needed_rows or c2 - c1 + 1 < needed_cols:
+        return None
+
+    row_options = list(range(max(r1, anchor_row - needed_rows + 1), r2 - needed_rows + 2))
+    col_options = list(range(max(c1, anchor_col - needed_cols + 1), c2 - needed_cols + 2))
+    if not row_options:
+        row_options = [r1]
+    if not col_options:
+        col_options = [c1]
+
+    best: tuple[float, list[str]] | None = None
+    for r0 in row_options:
+        for c0 in col_options:
+            cells: list[str] = []
+            ok = True
+            for rr in range(r0, r0 + needed_rows):
+                for cc in range(c0, c0 + needed_cols):
+                    if (rr, cc) in consumed:
+                        ok = False
+                        break
+                    cells.append(cell_id_from_rc(rr, cc))
+                if not ok:
+                    break
+            if not ok:
+                continue
+            cy = r0 + needed_rows / 2
+            cx = c0 + needed_cols / 2
+            dist = math.hypot(cy - anchor_row, cx - anchor_col)
+            if best is None or dist < best[0]:
+                best = (dist, cells)
+    return best[1] if best is not None else None
+
+
+def _v4_bbox_from_cells(grid: Any, cell_ids: list[str]) -> dict[str, Any] | None:
+    if not cell_ids:
+        return None
+    rcs = [rc_from_cell_id(cid) for cid in cell_ids]
+    rows = [r for r, _ in rcs]
+    cols = [c for _, c in rcs]
+    cs = float(grid.cell_size_pts)
+    x1 = grid.left_margin_pts + (min(cols) - 1) * cs
+    x2 = grid.left_margin_pts + max(cols) * cs
+    y1 = grid.top_margin_pts + (min(rows) - 1) * cs
+    y2 = grid.top_margin_pts + max(rows) * cs
+    return {
+        "page": grid.page,
+        "x1_percent": round((x1 / grid.page_w_pts) * 100.0, 2),
+        "y1_percent": round((y1 / grid.page_h_pts) * 100.0, 2),
+        "x2_percent": round((x2 / grid.page_w_pts) * 100.0, 2),
+        "y2_percent": round((y2 / grid.page_h_pts) * 100.0, 2),
+    }
+
+
+def _v4_synth_bbox(page_no: int, x1: float, x2: float, y: float, half_h: float = 1.5) -> dict[str, Any]:
+    return {
+        "page": page_no,
+        "x1_percent": round(max(0.0, min(100.0, x1)), 2),
+        "y1_percent": round(max(0.0, y - half_h), 2),
+        "x2_percent": round(max(0.0, min(100.0, x2)), 2),
+        "y2_percent": round(min(100.0, y + half_h), 2),
+    }
+
+
+def _v4_range_id(cell_ids: list[str]) -> str:
+    if not cell_ids:
+        return ""
+    if len(cell_ids) == 1:
+        return cell_ids[0]
+    rcs = [rc_from_cell_id(cid) for cid in cell_ids]
+    rs = [r for r, _ in rcs]
+    cs = [c for _, c in rcs]
+    return f"{cell_id_from_rc(min(rs), min(cs))}:{cell_id_from_rc(max(rs), max(cs))}"
+
+
+def assign_cell_ids_v4(
+    items: list[dict[str, Any]],
+    page_grids: list[Any],
+    *,
+    font_size_pts: float = REMARK_FONT_SIZE_PTS,
+    fontname: str = REMARK_FONTNAME_EN,
+    max_wrap_rows: int = REMARK_MAX_WRAP_ROWS,
+) -> None:
+    """Mutate ``annotations[*]`` to add ``cell_ids`` / ``range_id`` /
+    ``placement_tier`` / ``bbox`` using v4 cell grids.
+
+    Tier 1 (region) — pick the closest writable region whose dimensions can
+        fit the wrapped comment; carve a sub-rectangle near the anchor.
+    Tier 2 (run)    — fall back to greedy row-run placement (existing logic
+        operating on v4's field-compatible Cell objects).
+    Tier 3 (synth)  — derive a bbox from the annotation's hint x/y when no
+        page grid is available.
+    """
+    grid_by_page = {g.page: g for g in page_grids}
+    consumed_by_page: dict[int, set[tuple[int, int]]] = {}
+
+    for item in items:
+        # Reserve marking-box cells so annotations don't land on the score box
+        page_raw = item.get("marking_box_page")
+        if page_raw is not None:
+            try:
+                p = int(page_raw)
+                grid = grid_by_page.get(p)
+                if grid is not None:
+                    rc = _cells_in_rect(
+                        grid,
+                        x1_pct=float(item.get("marking_box_x1_percent", 0.0)),
+                        y1_pct=float(item.get("marking_box_y1_percent", 0.0)),
+                        x2_pct=float(item.get("marking_box_x2_percent", 0.0)),
+                        y2_pct=float(item.get("marking_box_y2_percent", 0.0)),
+                    )
+                    if rc:
+                        consumed_by_page.setdefault(p, set()).update(rc)
+            except (TypeError, ValueError):
+                pass
+
+        anns = item.get("annotations")
+        if not isinstance(anns, list):
+            continue
+        for ann in anns:
+            if not isinstance(ann, dict):
+                continue
+            try:
+                pi = int(ann.get("page_index", 0))
+            except (TypeError, ValueError):
+                continue
+            page_no = pi + 1
+
+            try:
+                x0 = float(ann.get("x_start_percent", 50.0))
+            except (TypeError, ValueError):
+                x0 = 50.0
+            try:
+                x1_end = float(ann.get("x_end_percent", min(100.0, x0 + 20.0)))
+            except (TypeError, ValueError):
+                x1_end = min(100.0, x0 + 20.0)
+            try:
+                yp = float(ann.get("y_position_percent", 50.0))
+            except (TypeError, ValueError):
+                yp = 50.0
+            comment = str(ann.get("comment", "") or "")
+
+            grid = grid_by_page.get(page_no)
+            if grid is None:
+                ann["cell_ids"] = []
+                ann["range_id"] = ""
+                ann["placement_tier"] = _TIER_SYNTH
+                ann["bbox"] = _v4_synth_bbox(page_no, x0, x1_end, yp)
+                continue
+
+            consumed = consumed_by_page.setdefault(page_no, set())
+            cells_per_row = max(
+                1,
+                estimate_remark_cell_width(
+                    comment,
+                    font_size_pts=font_size_pts,
+                    cell_size_pts=grid.cell_size_pts,
+                    fontname=fontname,
+                ),
+            )
+            anchor_row, anchor_col = _v4_anchor_rc(grid, x0, yp)
+
+            # Choose row count: try 1 first, then expand if region-friendly
+            placed: list[str] = []
+            tier = _TIER_SYNTH
+
+            for needed_rows in range(1, max_wrap_rows + 1):
+                needed_cols = max(1, math.ceil(cells_per_row / needed_rows))
+                # ── Tier 1: region search ──────────────────────────────────
+                regions = list(getattr(grid, "regions", []) or [])
+                if regions:
+                    candidates: list[tuple[float, Any]] = []
+                    for rg in regions:
+                        if rg.row_end - rg.row_start + 1 < needed_rows:
+                            continue
+                        if rg.col_end - rg.col_start + 1 < needed_cols:
+                            continue
+                        cy = (rg.row_start + rg.row_end) / 2.0
+                        cx = (rg.col_start + rg.col_end) / 2.0
+                        dist = math.hypot(cy - anchor_row, cx - anchor_col)
+                        candidates.append((dist, rg))
+                    candidates.sort(key=lambda t: t[0])
+                    for _d, rg in candidates[: REMARK_SEARCH_RADIUS_RUNS]:
+                        carved = _v4_carve_subrect(
+                            rg, anchor_row, anchor_col, needed_rows, needed_cols, consumed
+                        )
+                        if carved:
+                            placed = carved
+                            tier = _TIER_REGION
+                            break
+                if placed:
+                    break
+
+            # ── Tier 2: fall back to existing run-based logic ──────────────
+            if not placed:
+                try:
+                    placed = assign_cell_ids(
+                        grid,
+                        comment=comment,
+                        x_start_percent=x0,
+                        y_position_percent=yp,
+                        font_size_pts=font_size_pts,
+                        max_wrap_rows=max_wrap_rows,
+                        fontname=fontname,
+                        excluded=consumed,
+                    )
+                    if placed:
+                        tier = _TIER_RUN
+                except Exception:
+                    log.warning(
+                        "assign_cell_ids_v4 tier-2 failed page=%s comment_prefix=%r",
+                        page_no,
+                        comment[:80],
+                        exc_info=True,
+                    )
+                    placed = []
+
+            if placed:
+                for cid in placed:
+                    try:
+                        consumed.add(rc_from_cell_id(cid))
+                    except ValueError:
+                        continue
+                ann["cell_ids"] = placed
+                ann["range_id"] = _v4_range_id(placed)
+                ann["placement_tier"] = tier
+                ann["bbox"] = _v4_bbox_from_cells(grid, placed) or _v4_synth_bbox(
+                    page_no, x0, x1_end, yp
+                )
+            else:
+                # ── Tier 3: synth ──────────────────────────────────────────
+                ann["cell_ids"] = []
+                ann["range_id"] = ""
+                ann["placement_tier"] = _TIER_SYNTH
+                ann["bbox"] = _v4_synth_bbox(page_no, x0, x1_end, yp)
+
+
 def assign_cell_ids_to_annotations(
     items: list[dict[str, Any]],
     page_grids: list[PageCellGrid],

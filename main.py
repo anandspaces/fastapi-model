@@ -31,13 +31,13 @@ from src.gemini_copy_ocr import (
     ocr_essay_copy_pdf,
     ocr_essay_copy_pdf_rasterized,
 )
-from cell_grid_service import analyze_pdf_cell_grid
+from src.cell_grid_service import build_cell_grid, cell_grid_meta_payload
 from remark_cell_layout_service import (
     REMARK_FONTNAME_EN,
     REMARK_FONTNAME_HI,
     REMARK_FONT_SIZE_PTS,
     REMARK_MAX_WRAP_ROWS,
-    assign_bboxes_to_annotations,
+    assign_cell_ids_v4,
 )
 from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
@@ -1502,8 +1502,9 @@ async def post_analyse_smart_ocr(
         len(items),
     )
 
-    # Cell grid analysis runs concurrently with Stage 3 grading (when modelId set).
-    grid_task = asyncio.create_task(asyncio.to_thread(analyze_pdf_cell_grid, raw, dpi=250))
+    # Cell grid v4: 12pt cells, centered margins, runs + 2-D regions + meta.
+    # Runs concurrently with Stage 3 grading (when modelId set).
+    grid_task = asyncio.create_task(asyncio.to_thread(build_cell_grid, raw))
     remark_font = REMARK_FONTNAME_HI if lang == "hi" else REMARK_FONTNAME_EN
 
     # --- Stage 3: grading (only when modelId provided) ---
@@ -1542,7 +1543,7 @@ async def post_analyse_smart_ocr(
                     "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
                 )
                 _grading_fail_grids = []
-            assign_bboxes_to_annotations(
+            assign_cell_ids_v4(
                 items,
                 _grading_fail_grids,
                 font_size_pts=REMARK_FONT_SIZE_PTS,
@@ -1559,6 +1560,7 @@ async def post_analyse_smart_ocr(
                     checkLevel=check_canon,
                     gradingError=str(e),
                     skippedPages=_smart_ocr_skipped_pages(page_count, items),
+                    cellGridMeta=cell_grid_meta_payload(_grading_fail_grids),
                 )
             )
 
@@ -1569,7 +1571,7 @@ async def post_analyse_smart_ocr(
             "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
         )
         page_grids = []
-    assign_bboxes_to_annotations(
+    assign_cell_ids_v4(
         items,
         page_grids,
         font_size_pts=REMARK_FONT_SIZE_PTS,
@@ -1589,6 +1591,7 @@ async def post_analyse_smart_ocr(
             pageCount=page_count,
             items=items,
             skippedPages=skipped_pages,
+            cellGridMeta=cell_grid_meta_payload(page_grids),
             **extra,
         )
     )

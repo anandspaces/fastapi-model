@@ -714,3 +714,70 @@ poppler-utils   # apt install poppler-utils  (Ubuntu)
 - At 250 DPI, A4 page (595×842 pts) → ≈ 2068×2924 px
 - `scale = dpi / 150.0` used throughout for DPI-relative sizing
 - `_seed(cx, cy)` → `random.seed(int(cx)*31337 + int(cy))` — deterministic per annotation position
+
+---
+
+## Cell Grid v4 — Annotation placement & Gemini handoff
+
+`cell_grid_service_v4.py` is the **fine-grained** writable-space analyser used
+by `/analyse/smart-ocr` to emit per-annotation `cell_ids` / `range_id` /
+`placement_tier` / `bbox`. Detailed reference lives in
+`CELL_GRID_GUIDE.md`; key invariants for this codebase:
+
+* **One file, two consumers.** Algorithm lives in `cell_grid_service_v4.py`
+  (engine + CLI). FastAPI imports go through `src/cell_grid_service.py`
+  (wrapper: `build_cell_grid`, `cell_grid_meta_payload`,
+  `build_overlay_pdf`). Do not import the v4 module directly from `main.py`.
+* **Cells are 12 pt** by default (4× finer than v3). Margins are **centred**
+  (`(page_w − cols·cell_size) / 2`).
+* **Score formula:** `clip(mean − std, 0, 1)` — fixes the v1
+  `mean·(1-std)` collapse on edge cells.
+* **Ink mask morphology:** binary close 3×3, then erode 3×3, before per-cell
+  scoring. Single-pixel specks no longer disqualify cells.
+* **Per-cell metrics are vectorised** via integral images. Don't reintroduce
+  per-cell Python loops.
+* **Regions = maximal rectangles**, not connected components — CC made one
+  blob spanning the whole page on real answer sheets. Cap 32/page, sorted
+  by area, deduped (no rect strictly inside another).
+* **Row runs** stay v3-shape-compatible for callers wanting 1-D placement.
+
+### Annotation placement
+
+`remark_cell_layout_service.assign_cell_ids_v4(items, grids)` mutates each
+annotation in-place and emits four fields:
+
+| Field | Meaning |
+|---|---|
+| `cell_ids[]` | Ordered (left→right, top→bottom) cell IDs the annotation occupies. |
+| `range_id` | `"start:end"` (or `"start"` for single cell). |
+| `placement_tier` | 1 = region, 2 = run, 3 = synth (no grid / nothing fit). |
+| `bbox` | Percent rectangle computed from cell IDs — kept for backwards compat. |
+
+Tier 1 carves a sub-rectangle from the closest writable region whose
+dimensions can fit the wrapped comment. Tier 2 falls back to the v1
+run-based logic (greedy row-then-wrap). Tier 3 synthesises a bbox from the
+annotation hint coordinates ±1.5 % when no grid is available.
+
+### Response shape
+
+`/analyse/smart-ocr` adds a top-level `cellGridMeta` array (one entry per
+page: `rows`, `cols`, `cell_size_pts`, margins, page dims). Frontends use
+this to resolve any cell ID → percent rectangle without round-tripping to
+the server. See `FRONTEND_ANNOTATION_GUIDE.md` for the JS resolver.
+
+### Tests
+
+```bash
+python3 -m pytest test_cell_grid_service_v4.py -v   # 30 tests, all green
+python3 cell_grid_service_v4.py test_original_pdf1.pdf overlay_pdf1_v4.pdf
+python3 cell_grid_service_v4.py test_original_pdf2.pdf overlay_pdf2_v4.pdf
+python3 cell_grid_service_v4.py test_pdf3.pdf overlay_pdf3_v4.pdf  # ~3 min
+```
+
+### Legacy
+
+`cell_grid_service.py` (v1) and `cell_grid_service_v3.py` are still on disk
+but **no longer wired into `main.py`**. Keep them around until v4 has run
+in production for a release; then delete + remove
+`assign_bboxes_to_annotations` (the v1-based placer in
+`remark_cell_layout_service.py`).
