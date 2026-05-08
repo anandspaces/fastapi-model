@@ -33,7 +33,7 @@ import fitz  # PyMuPDF
 import numpy as np
 from scipy import ndimage
 
-CELL_SIZE_PTS: float = 12.0
+CELL_SIZE_PTS: float = 24.0
 RASTER_DPI: int = 300
 INK_BRIGHTNESS_MAX: float = 0.45
 WRITABLE_MIN_SCORE: float = 0.70
