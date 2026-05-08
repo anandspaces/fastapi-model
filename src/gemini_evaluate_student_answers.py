@@ -86,6 +86,258 @@ def evaluation_strictness_instruction(check_level: str) -> str:
     )
 
 
+def _build_evaluation_prompt_with_overlay(
+    subject: str,
+    teacher_instructions: str,
+    student_json: str,
+    *,
+    check_level: str = "Moderate",
+) -> str:
+    """Cell-overlay grading prompt — Gemini sees the per-page raster with every
+    cell ID printed inside it, and emits cell-ID-native placement directly.
+
+    Used when ``SMART_OCR_OVERLAY_PROMPT=1``. Companion to
+    :func:`_build_evaluation_prompt` (the legacy percent-coord prompt) — both
+    coexist while the new path is dialed up.
+
+    The caller MUST attach the overlay images (one ``image/jpeg`` Part per
+    page, page-1 first) to the multimodal payload after this prompt's text
+    Part. The prompt body references them as the spatial vocabulary.
+    """
+    strict_line = evaluation_strictness_instruction(check_level)
+    return f"""You are a strict but fair {subject} examiner-mentor (UPSC Civil Services / mains-answer ethos). Your feedback reads like seasoned script evaluation — professional, restrained, clinically useful — never cheerleading.
+
+You receive:
+  1. TEACHER INSTRUCTIONS / MODEL KEY for each question.
+  2. STUDENT'S OCR-EXTRACTED ANSWERS.
+  3. CELL-OVERLAY IMAGES — one per PDF page, attached after this message in
+     page order. Each is the original answer sheet with a cell grid drawn over
+     it. Every cell shows its cell ID (Excel-style: A1, B1, …, Z1, AA1, AB1, …).
+     Cells tinted GREEN are writable (no handwriting underneath). White cells
+     contain handwriting or printed content.
+
+Your job: grade the student against the teacher key, place examiner-style
+annotations directly onto the cell grid, and emit one structured row per
+teacher question.
+
+═════════════════════════════════════════════════════════════════════════
+MARKING RULES
+═════════════════════════════════════════════════════════════════════════
+{strict_line}
+- max_marks MUST exactly match "MAX MARKS ALLOWED" in TEACHER INSTRUCTIONS.
+- Booklet vs instruction_name: when a question includes "Instructions
+  (examiner marking key)" via instruction_name, factor that into gaps,
+  positives, marks, feedback, and annotations.
+- Award marks_awarded as a DECIMAL in multiples of 0.5.
+- NEVER exceed MAX MARKS. Perfect answer → exactly the max.
+- Conceptual flexibility: do not blindly string-match; award full marks if
+  underlying logic is identical.
+- FEEDBACK TONE: understated, examiner-like — name one concrete merit only
+  if warranted, foreground exact gaps. Forbidden flattery phrases
+  ('Excellent', 'Outstanding', 'Brilliant'). 25–40 words.
+
+═════════════════════════════════════════════════════════════════════════
+ANNOTATION TONE (per-annotation `comment`)
+═════════════════════════════════════════════════════════════════════════
+- Mentor script: precise, corrective, syllabus-aware — cite what would earn
+  the next increment of marks.
+- Use is_positive: true SPARINGLY (only distinctive merit).
+- Substantive answers should skew toward developmental comments, not applause.
+
+═════════════════════════════════════════════════════════════════════════
+SPATIAL VOCABULARY  (every spatial output is a list of single-row ranges)
+═════════════════════════════════════════════════════════════════════════
+- Cell IDs come straight off the overlay raster you are looking at.
+- A "row range" covers consecutive cells on ONE row, written as
+  "<start>:<end>", e.g. "E13:S13" means columns E through S on row 13.
+- Multi-row content is a LIST of row ranges, one per row, each spanning
+  exactly the cells that row contains:
+        ["E13:S13", "E14:T14", "E15:Q15"]
+  This faithfully captures ragged right edges — do NOT collapse rows
+  into one big rectangle.
+- Coordinates do not cross pages; each annotation belongs to exactly one
+  page.
+
+YOU OUTPUT ONLY CELL IDS. No percent or pixel coordinates anywhere.
+
+═════════════════════════════════════════════════════════════════════════
+ANSWER_SPAN  →  per-page list of row ranges where the student's ink sits
+═════════════════════════════════════════════════════════════════════════
+Walk row-by-row down each page. For every row that contains the student's
+handwriting (NOT printed question text, NOT margin rules), emit one row
+range covering the cells from the leftmost inked cell to the rightmost
+inked cell. Skip blank rows between paragraphs.
+
+═════════════════════════════════════════════════════════════════════════
+COMMENT PLACEMENT  →  comment_rows
+═════════════════════════════════════════════════════════════════════════
+- comment_rows is a LIST of single-row ranges, one per row of the comment.
+- Every cell in every range MUST be GREEN (writable) on the overlay.
+- Place the comment NEXT TO the handwriting it critiques — usually in the
+  LEFT margin (cols A–D) or the RIGHT margin (last few columns) of the same
+  row band as the relevant answer rows.
+- Comment text wraps row by row.
+
+Capacity (HomemadeApple at comment_font_pts, given cell side L pts):
+    chars_per_cell  ≈ floor(L / 6.5)
+    lines_per_cell  ≈ 1 (for L ≤ 24)
+
+NO TWO annotations on the same page may share any cell across their
+comment_rows.
+
+Examples:
+  "comment_rows": ["A13:D13", "A14:D14", "A15:D15", "A16:D16"]   // left margin
+  "comment_rows": ["U25:X25", "U26:X26", "U27:X27"]              // right margin
+
+═════════════════════════════════════════════════════════════════════════
+COMMENT FONT  →  comment_font_pts
+═════════════════════════════════════════════════════════════════════════
+Float in [11.0, 15.0]. Default 12.0. Larger only for critical points where
+comment_rows can absorb the larger text.
+
+═════════════════════════════════════════════════════════════════════════
+ANCHOR MARK  →  anchor.type, anchor.rows, anchor.extra
+═════════════════════════════════════════════════════════════════════════
+Pick exactly ONE anchor mark per annotation. The mark sits ON the
+student's content — anchor.rows MAY include white (non-writable) cells.
+
+  type             rows shape                           extra (required)
+  ──────────────  ───────────────────────────────────  ─────────────────────
+  circle          1 row, 2–6 cols                      —
+  tick            1 row, 1 cell                        —
+  underline       1 row, N cols (the inked sentence)   —
+  curly_brace     N rows, 1 col, in margin             side: "left"|"right"
+  exponent_caret  1 row, 1 cell                        missing_word: "<word>"
+  none            (omit anchor.rows entirely)          —
+
+When to use each:
+  - circle           → wrong word, misspelling, phrase to highlight
+  - tick             → unambiguous merit (use SPARINGLY)
+  - underline        → a sentence/clause to emphasise or correct
+  - curly_brace      → paragraph-level remark spanning multiple rows
+  - exponent_caret   → missing word at a specific gap
+  - none             → comment without a mark (layout/structural critique)
+
+═════════════════════════════════════════════════════════════════════════
+MARKING  (the score circle and the marking strip)
+═════════════════════════════════════════════════════════════════════════
+"marking": {{
+  "page": N,
+  "score_range": "AC18:AE19",       // small rect of cells the score circle wraps
+  "score_box_range": "Y17:AH20"     // outer rect, the marking strip / stamp area
+}}
+score_range MUST sit inside score_box_range.
+
+═════════════════════════════════════════════════════════════════════════
+ANNOTATION DENSITY
+═════════════════════════════════════════════════════════════════════════
+- Substantive answer (~6–8+ lines or multi-paragraph): AT LEAST 4 annotations.
+  Cover three structural zones when each exists:
+    1) Opening / introduction
+    2) Body / core evidence
+    3) Conclusion / synthesis
+- Short answer (≤3 lines): AT LEAST 2 annotations anchored to concrete phrases.
+- Per-page density: 2–4 annotations on a dense page.
+
+═════════════════════════════════════════════════════════════════════════
+UNATTEMPTED QUESTIONS
+═════════════════════════════════════════════════════════════════════════
+status: "unattempted", marks_awarded: 0, feedback: "Question not attempted."
+student_answer: "", student_answer_summary: "",
+answer_span: [], marking: null, annotations: []
+
+Emit one row per teacher question — never omit one.
+
+═════════════════════════════════════════════════════════════════════════
+INPUT
+═════════════════════════════════════════════════════════════════════════
+TEACHER INSTRUCTIONS / MODEL KEY ({subject}):
+{teacher_instructions}
+
+STUDENT'S EXTRACTED ANSWERS:
+{student_json}
+
+The CELL-OVERLAY IMAGES follow this prompt in page order (page 1 first).
+
+═════════════════════════════════════════════════════════════════════════
+OUTPUT  (JSON array — one object per teacher question, in order)
+═════════════════════════════════════════════════════════════════════════
+[
+  {{
+    "question_id": 1,
+    "question": "...full question text...",
+    "max_marks": 8,
+    "marks_awarded": 4.5,
+    "status": "partial",
+    "student_answer_summary": "...",
+    "feedback": "Insightful specific feedback (25–40 words).",
+
+    "answer_span": [
+      {{ "page": 2, "rows": [
+          "E13:S13","E14:T14","E15:Q15","E16:V16","E17:V17","E18:T18",
+          "F25:M25","F26:T26","F27:S27","F28:T28"
+      ]}}
+    ],
+
+    "marking": {{
+      "page": 2,
+      "score_range": "AC18:AE19",
+      "score_box_range": "Y17:AH20"
+    }},
+
+    "annotations": [
+      {{
+        "page": 2,
+        "is_positive": false,
+        "comment": "Define EI before applying it.",
+        "comment_font_pts": 12.0,
+        "comment_rows": ["A13:D13","A14:D14","A15:D15","A16:D16"],
+        "anchor": {{ "type": "underline", "rows": ["E13:S13"] }}
+      }},
+      {{
+        "page": 2,
+        "is_positive": false,
+        "comment": "Add 'self-regulation' here.",
+        "comment_font_pts": 12.0,
+        "comment_rows": ["P14:T15"],
+        "anchor": {{
+          "type": "exponent_caret",
+          "rows": ["M14:M14"],
+          "extra": {{ "missing_word": "self-regulation" }}
+        }}
+      }}
+    ]
+  }}
+]
+
+═════════════════════════════════════════════════════════════════════════
+INVARIANTS YOUR OUTPUT MUST SATISFY
+═════════════════════════════════════════════════════════════════════════
+1.  Every cell ID is within its page's grid.
+2.  Each entry in any "rows" array is a SINGLE-ROW range "X<n>:Y<n>"
+    (start row == end row). Multi-row content is a list of these.
+3.  Every cell in comment_rows is GREEN (writable) on the overlay.
+4.  anchor.rows cells are valid grid cells (writability not required).
+5.  marking.score_range ⊆ marking.score_box_range.
+6.  comment_font_pts ∈ [11.0, 15.0].
+7.  No two annotations on the same page share any cell in their comment_rows.
+8.  exponent_caret has non-empty extra.missing_word.
+9.  curly_brace has extra.side ∈ {{"left","right"}}.
+
+If you cannot satisfy an invariant, prefer dropping the anchor
+(type: "none") or shrinking comment_font_pts.
+
+═════════════════════════════════════════════════════════════════════════
+JSON FORMATTING
+═════════════════════════════════════════════════════════════════════════
+- Output ONLY a valid JSON array. No prose.
+- Escape literal " as \\". Use \\n for line breaks inside strings.
+- No trailing commas. No comments.
+- status ∈ {{"correct","partial","wrong","unattempted"}}.
+- Use the student's language for every comment.
+"""
+
+
 def _build_evaluation_prompt(
     subject: str,
     teacher_instructions: str,
@@ -563,18 +815,42 @@ def evaluate_student_answers_against_model(
     *,
     request_id: str,
     check_level: str = "Moderate",
+    overlay_images: list[bytes] | None = None,
+    use_overlay_prompt: bool = False,
 ) -> list[dict[str, Any]]:
     """Call Gemini to grade student OCR items against the teacher model key.
 
     ``check_level`` is ``Moderate`` or ``Hard`` (``checkLevel`` parity).
 
+    ``overlay_images`` + ``use_overlay_prompt``: when both are provided, the
+    cell-overlay grading prompt is used and the JPEG bytes are attached to
+    the multimodal payload (one image part per page, page-1 first). Gemini
+    emits cell-ID-native placement (``comment_rows``, ``anchor.rows``,
+    ``answer_span[].rows``) directly. Otherwise the legacy percent-coord
+    prompt runs unchanged.
+
     Returns a list of evaluation dicts (one per teacher question).
     Raises ValueError if all attempts fail and regex fallback is also empty.
     """
     student_json = json.dumps(student_items, ensure_ascii=False)
-    prompt = _build_evaluation_prompt(
-        subject, teacher_instructions, student_json, check_level=check_level
-    )
+
+    if use_overlay_prompt and overlay_images:
+        prompt = _build_evaluation_prompt_with_overlay(
+            subject, teacher_instructions, student_json, check_level=check_level
+        )
+        contents: list[types.Part] = [types.Part.from_text(text=prompt)]
+        for img in overlay_images:
+            contents.append(types.Part.from_bytes(data=img, mime_type="image/jpeg"))
+        log.info(
+            "evaluate[%s] using cell-overlay prompt (pages=%s, payload=%s KB)",
+            request_id, len(overlay_images),
+            sum(len(b) for b in overlay_images) // 1024,
+        )
+    else:
+        prompt = _build_evaluation_prompt(
+            subject, teacher_instructions, student_json, check_level=check_level
+        )
+        contents = [types.Part.from_text(text=prompt)]
 
     client = genai.Client(api_key=api_key)
     cfg = types.GenerateContentConfig(
@@ -590,7 +866,7 @@ def evaluate_student_answers_against_model(
         try:
             resp = client.models.generate_content(
                 model=MODEL_ID,
-                contents=[types.Part.from_text(text=prompt)],
+                contents=contents,
                 config=cfg,
             )
             raw = (getattr(resp, "text", None) or "").strip()

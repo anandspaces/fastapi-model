@@ -39,6 +39,7 @@ from remark_cell_layout_service import (
     REMARK_MAX_WRAP_ROWS,
     assign_cell_ids_v4,
 )
+from cell_overlay_renderer import render_overlay_pngs
 from src.cell_response_formatter import build_response_items
 from src.gemini_smart_ocr import smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
@@ -1517,6 +1518,37 @@ async def post_analyse_smart_ocr(
                 questions, title
             )
             items_to_grade = student_items_for_grading(items)
+
+            # Cell-overlay grading prompt (env-gated). Renders one
+            # cell-labelled JPEG per page and attaches them to the eval call,
+            # letting Gemini emit cell-ID-native placement directly. Falls
+            # back to the legacy percent-coord prompt on render/grid failure.
+            overlay_images: list[bytes] | None = None
+            use_overlay_prompt = os.environ.get(
+                "SMART_OCR_OVERLAY_PROMPT", ""
+            ).strip().lower() in ("1", "true", "yes", "on")
+            if use_overlay_prompt:
+                try:
+                    _grids_for_overlay = await grid_task
+                    overlay_images = await asyncio.to_thread(
+                        render_overlay_pngs,
+                        raw, _grids_for_overlay,
+                        dpi=150, image_format="jpeg", jpeg_quality=85,
+                        label_every_cell=True,
+                    )
+                    log.info(
+                        "analyse/smart-ocr overlay-prompt request_id=%s pages=%s payload_kb=%s",
+                        rid, len(overlay_images),
+                        sum(len(b) for b in overlay_images) // 1024,
+                    )
+                except Exception as overlay_exc:
+                    log.warning(
+                        "analyse/smart-ocr overlay render failed request_id=%s: %s",
+                        rid, overlay_exc,
+                    )
+                    overlay_images = None
+                    use_overlay_prompt = False
+
             ev_list = await asyncio.to_thread(
                 evaluate_student_answers_against_model,
                 api_key,
@@ -1525,6 +1557,8 @@ async def post_analyse_smart_ocr(
                 items_to_grade,
                 request_id=rid,
                 check_level=check_canon,
+                overlay_images=overlay_images,
+                use_overlay_prompt=use_overlay_prompt,
             )
             items = merge_evaluations_into_items(items, ev_list)
             log.info(

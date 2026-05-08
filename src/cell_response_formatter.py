@@ -102,6 +102,35 @@ def _range_from_cells(cell_ids: list[str]) -> str | None:
 def _build_answer_span(
     item: dict[str, Any], grids_by_page: dict[int, PageCellGrid]
 ) -> list[dict[str, Any]]:
+    """Per-page answer span. Two source shapes accepted:
+
+    1. Gemini cell-overlay path emits ``answer_span: [{"page": N, "rows":
+       ["E13:S13", "E14:T14", ...]}]`` directly — passed through as-is
+       (after light validation).
+    2. Legacy placer path emits ``start_page`` / ``start_y_position_percent``
+       / ``end_page`` / ``end_y_position_percent`` — derived to a per-page
+       top/bottom cell pair using the grid.
+    """
+    direct = item.get("answer_span")
+    if isinstance(direct, list) and direct:
+        out: list[dict[str, Any]] = []
+        for span in direct:
+            if not isinstance(span, dict):
+                continue
+            page = span.get("page")
+            rows = span.get("rows")
+            if isinstance(rows, list) and rows:
+                out.append({"page": int(page), "rows": [str(r) for r in rows]})
+                continue
+            top_cell = span.get("top_cell")
+            bot_cell = span.get("bottom_cell")
+            if page is not None and top_cell and bot_cell:
+                out.append({"page": int(page),
+                             "top_cell": str(top_cell),
+                             "bottom_cell": str(bot_cell)})
+        if out:
+            return out
+
     sp = item.get("start_page")
     ep = item.get("end_page")
     if sp is None or ep is None:
@@ -131,6 +160,26 @@ def _build_answer_span(
 def _build_marking(
     item: dict[str, Any], grids_by_page: dict[int, PageCellGrid]
 ) -> dict[str, Any] | None:
+    """Marking block. Two source shapes accepted:
+
+    1. Gemini cell-overlay path emits ``marking: {page, score_range,
+       score_box_range}`` — passed through as-is.
+    2. Legacy placer path emits ``marking_page`` + ``marking_*_percent`` —
+       derived to cell IDs using the grid.
+    """
+    direct = item.get("marking")
+    if isinstance(direct, dict):
+        page = direct.get("page")
+        if page is not None:
+            block: dict[str, Any] = {"page": int(page)}
+            score_range = direct.get("score_range")
+            if isinstance(score_range, str) and score_range:
+                block["score_range"] = score_range
+            score_box_range = direct.get("score_box_range")
+            if isinstance(score_box_range, str) and score_box_range:
+                block["score_box_range"] = score_box_range
+            return block
+
     mp = item.get("marking_page")
     if mp is None:
         return None
@@ -172,18 +221,79 @@ def _build_marking(
     return block
 
 
+_VALID_ANCHOR_TYPES = (
+    "circle", "tick", "underline", "curly_brace", "exponent_caret", "none",
+)
+
+
+def _normalise_anchor(raw: Any) -> dict[str, Any]:
+    """Coerce Gemini-emitted anchor (or absent value) into the wire shape.
+
+    Default: ``{"type": "none"}``. Pass-through when valid. ``rows[]`` entries
+    are stringified; ``extra`` is preserved if present.
+    """
+    if not isinstance(raw, dict):
+        return {"type": "none"}
+    atype = raw.get("type")
+    if atype not in _VALID_ANCHOR_TYPES:
+        return {"type": "none"}
+    out: dict[str, Any] = {"type": atype}
+    rows = raw.get("rows")
+    if isinstance(rows, list) and rows:
+        out["rows"] = [str(r) for r in rows]
+    extra = raw.get("extra")
+    if isinstance(extra, dict) and extra:
+        out["extra"] = dict(extra)
+    return out
+
+
 def _build_annotation(ann: dict[str, Any]) -> dict[str, Any]:
-    try:
-        page = int(ann.get("page_index", 0)) + 1
-    except (TypeError, ValueError):
-        page = 1
+    """Per-annotation wire shape. Two source shapes accepted:
+
+    1. Gemini cell-overlay path: ``page`` (1-indexed), ``comment_rows[]``
+       and ``anchor`` are emitted directly. Passed through.
+    2. Legacy placer path: ``page_index`` (0-indexed), ``range_id`` /
+       ``cell_ids[]`` from ``assign_cell_ids_v4``. Translated.
+    """
+    # Page — prefer Gemini's 1-indexed `page`, fall back to 0-indexed `page_index`.
+    if "page" in ann:
+        try:
+            page = int(ann["page"])
+        except (TypeError, ValueError):
+            page = 1
+    else:
+        try:
+            page = int(ann.get("page_index", 0)) + 1
+        except (TypeError, ValueError):
+            page = 1
+
     out: dict[str, Any] = {
         "page": page,
         "is_positive": bool(ann.get("is_positive", False)),
         "comment": str(ann.get("comment") or ""),
         "comment_font_pts": float(ann.get("comment_font_pts") or DEFAULT_COMMENT_FONT_PTS),
-        "anchor": {"type": "none"},
+        "anchor": _normalise_anchor(ann.get("anchor")),
     }
+
+    # comment_rows — Gemini's row-wise list. Pass through; backfill the
+    # bounding rect into comment_range for any client still on the old shape.
+    comment_rows = ann.get("comment_rows")
+    if isinstance(comment_rows, list) and comment_rows:
+        rows = [str(r) for r in comment_rows]
+        out["comment_rows"] = rows
+        all_cells: list[str] = []
+        for r in rows:
+            if ":" in r:
+                a, b = r.split(":", 1)
+                all_cells.extend([a.strip(), b.strip()])
+            else:
+                all_cells.append(r.strip())
+        derived = _range_from_cells(all_cells)
+        if derived:
+            out["comment_range"] = derived
+        return out
+
+    # Legacy placer path — single rectangular comment_range.
     rid = ann.get("range_id")
     if rid:
         out["comment_range"] = str(rid)

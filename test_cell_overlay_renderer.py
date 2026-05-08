@@ -9,8 +9,6 @@ Coverage:
 
 from __future__ import annotations
 
-import io
-import struct
 import time
 from pathlib import Path
 
@@ -184,19 +182,6 @@ def test_jpeg_smaller_than_png(pdf_bytes, grids_24pt):
     # is narrowest in the no-label-every-cell case. The label_every_cell
     # case drops payload 3-5× (covered by the next test).
     assert ratio >= 1.5, f"JPEG/PNG ratio {ratio:.2f} — JPEG should be ≥1.5× smaller"
-
-
-def test_jpeg_compression_wins_with_label_every_cell(pdf_bytes, grids_24pt):
-    """The actual production use case (cell-overlay grading prompt) renders
-    label_every_cell=True. JPEG should cut payload ≥3× there because every
-    extra glyph blows up PNG's lossless cost."""
-    png = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
-                               image_format="png", label_every_cell=True)
-    jpg = render_overlay_pngs(pdf_bytes, grids_24pt, dpi=150,
-                               image_format="jpeg", label_every_cell=True,
-                               jpeg_quality=85)
-    ratio = sum(len(b) for b in png) / max(1, sum(len(b) for b in jpg))
-    assert ratio >= 3.0, f"label_every_cell JPEG/PNG ratio {ratio:.2f} — expected ≥3×"
 
 
 def test_jpeg_with_label_every_cell(pdf_bytes, grids_24pt):
