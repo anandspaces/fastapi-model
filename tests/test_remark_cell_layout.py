@@ -377,8 +377,12 @@ def test_assign_cell_ids_returns_empty_when_no_full_fit():
     assert ids == [], f"expected [] when no run fits the comment, got {ids}"
 
 
-def test_assign_bboxes_drops_bbox_when_no_room():
-    """Annotation gets no ``bbox`` when the page cannot host its full comment."""
+def test_assign_bboxes_fallback_slot_when_no_room():
+    """When Tier 1 (cell-grid) cannot fit the comment, Tier 2 margin-slot bbox is used.
+
+    The bbox must always be present and must sit inside either the right margin
+    (x1 >= 87.5) or the left margin (x2 <= 12.5) — never absent.
+    """
     cells: list[Cell] = []
     rows, cols = 4, 6
     cw = 100.0 / cols
@@ -432,7 +436,14 @@ def test_assign_bboxes_drops_bbox_when_no_room():
         max_wrap_rows=3,
     )
     ann = items[0]["annotations"][0]
-    assert "bbox" not in ann, f"expected no bbox when comment cannot fit, got {ann.get('bbox')}"
+    assert "bbox" in ann, "bbox must always be present — Tier 2 slot should fire"
+    bb = ann["bbox"]
+    assert bb["page"] == 1
+    in_right = bb["x1_percent"] >= 87.5
+    in_left  = bb["x2_percent"] <= 12.5
+    assert in_right or in_left, (
+        f"fallback bbox should be in a margin, got {bb}"
+    )
 
 
 def test_assign_bboxes_skips_marking_box_cells():

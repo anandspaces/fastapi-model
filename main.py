@@ -1536,20 +1536,19 @@ async def post_analyse_smart_ocr(
                 "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid
             )
             try:
-                page_grids = await grid_task
-                assign_bboxes_to_annotations(
-                    items,
-                    page_grids,
-                    font_size_pts=REMARK_FONT_SIZE_PTS,
-                    fontname=remark_font,
-                    max_wrap_rows=REMARK_MAX_WRAP_ROWS,
-                )
+                _grading_fail_grids = await grid_task
             except Exception as grid_exc:
                 log.warning(
-                    "analyse/smart-ocr bbox enrich failed request_id=%s: %s",
-                    rid,
-                    grid_exc,
+                    "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
                 )
+                _grading_fail_grids = []
+            assign_bboxes_to_annotations(
+                items,
+                _grading_fail_grids,
+                font_size_pts=REMARK_FONT_SIZE_PTS,
+                fontname=remark_font,
+                max_wrap_rows=REMARK_MAX_WRAP_ROWS,
+            )
             # Don't fail the whole response — return OCR items with error note
             return JSONResponse(
                 _ok(
@@ -1565,19 +1564,18 @@ async def post_analyse_smart_ocr(
 
     try:
         page_grids = await grid_task
-        assign_bboxes_to_annotations(
-            items,
-            page_grids,
-            font_size_pts=REMARK_FONT_SIZE_PTS,
-            fontname=remark_font,
-            max_wrap_rows=REMARK_MAX_WRAP_ROWS,
-        )
     except Exception as grid_exc:
         log.warning(
-            "analyse/smart-ocr bbox enrich failed request_id=%s: %s",
-            rid,
-            grid_exc,
+            "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
         )
+        page_grids = []
+    assign_bboxes_to_annotations(
+        items,
+        page_grids,
+        font_size_pts=REMARK_FONT_SIZE_PTS,
+        fontname=remark_font,
+        max_wrap_rows=REMARK_MAX_WRAP_ROWS,
+    )
 
     # --- Build response ---
     extra: dict = {"checkLevel": check_canon}

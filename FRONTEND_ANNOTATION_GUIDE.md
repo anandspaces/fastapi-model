@@ -75,7 +75,8 @@ Fields:
             "x_end_percent": 78.0,       // hint X end
             "comment": "Assertion unsupported — cite policy or statute.",
             "is_positive": false,
-            // bbox = the ACTUAL writable zone to render in:
+            // bbox = where to render the comment callout.
+            // ALWAYS present — guaranteed by three-tier fallback (see §7).
             "bbox": {
               "page": 2,                 // 1-based
               "x1_percent": 72.5,
@@ -158,8 +159,8 @@ function ScoreBox({ item, pageContainer }) {
 
 ## 5. Rendering Annotation Comments (`annotations[].bbox`)
 
-Each annotation has a `bbox` giving the writable zone where the comment fits without
-overlapping existing handwriting. Render a callout/badge inside that rect.
+Every annotation is **guaranteed to have a `bbox`** (see §7 for how the backend
+ensures this). Render a callout/badge inside that rect.
 
 `is_positive: true` → green (the student got something right)
 `is_positive: false` → red/amber (corrective feedback)
@@ -168,7 +169,7 @@ overlapping existing handwriting. Render a callout/badge inside that rect.
 ```jsx
 function AnnotationLayer({ item, pageNo }) {
   return item.annotations
-    .filter(ann => ann.bbox && ann.bbox.page === pageNo)
+    .filter(ann => ann.bbox?.page === pageNo)   // bbox always present; filter by page only
     .map((ann, i) => {
       const { x1_percent, y1_percent, x2_percent, y2_percent } = ann.bbox;
       const color = ann.is_positive === true  ? "#16a34a"
@@ -236,11 +237,28 @@ percent coordinates map 1-to-1. Use `ResizeObserver` or CSS to keep them in sync
 
 | Situation | What the API returns | How to handle |
 |---|---|---|
-| No writable space found for a comment | `ann.bbox` is absent | Show comment in a tooltip on hover, or skip the overlay |
+| Dense page — no large free zone | `ann.bbox` in right/left margin (Tier 2 slot) | Render normally — bbox is valid margin space |
+| Completely full page — no grid | `ann.bbox` synthesised from annotation x/y ± 1.5% (Tier 3) | Render normally; callout may overlap handwriting |
 | Question not attempted | `is_attempted: false`, `marks: 0`, `annotations: []` | Grey out the marking box |
 | Intro / cover page | In `skippedPages` list; no item spans it | Render the page without any overlay |
 | Multi-page answer | `start_page ≠ end_page`; annotations have individual `bbox.page` | Render each annotation on its own page |
 | `marking_box_*` fields absent | Can happen if cell-grid found no blank zone near the answer | Fall back to `marking_x/y_position_percent` for bubble centre, skip the box |
+
+### How bbox is guaranteed — three-tier fallback
+
+The backend assigns a `bbox` to every annotation using this priority order:
+
+| Tier | Condition | bbox source |
+|---|---|---|
+| **1 — Cell-grid** | Writable cells available on the page | Optimal writable zone; avoids existing ink and other annotations |
+| **2 — Page slot** | Tier 1 fails (dense page / cells consumed) | Nearest unused pre-partitioned strip spanning full page width; bbox snaps to writable cells anywhere in that strip (mid-page gaps, diagrams, etc.); falls back to right-margin geometry only when the strip has zero writable cells; 20 slots per page, non-overlapping |
+| **3 — Synthesis** | No page grid at all | `{x: annotation x_start–x_end, y: annotation y ± 1.5%}` |
+
+Tier 2 slots are sized at 5 % of page height each and cover the full page width.
+The bbox within a slot tightens to the union of writable cells found anywhere in
+that strip — mid-page gaps, diagram whitespace, wide line-endings — not just the
+margins.  With 20 slots per page, realistic answer sheets (≤ 6–8 annotations per
+page) never exhaust the pool.
 
 ---
 

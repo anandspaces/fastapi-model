@@ -325,6 +325,86 @@ def _bbox_from_cell_ids(
     }
 
 
+# --- Slot pool (fallback bbox allocation) ----------------------------------------
+
+_SLOT_POOL_SIZE     = 20    # horizontal strips across full page height
+_SLOT_FALLBACK_X1   = 87.5  # right-margin x used only when a strip has zero writable cells
+_SLOT_FALLBACK_X2   = 100.0
+
+
+def _build_slot_pool(page_grid: PageCellGrid) -> list[dict[str, Any]]:
+    """Pre-partition the full page into _SLOT_POOL_SIZE equal-height strips.
+
+    Within each strip all writable cells are considered regardless of x position —
+    free space can appear anywhere (mid-page gaps, wide diagram areas, etc.).
+    Only when a strip contains no writable cells does the slot fall back to
+    the right-margin geometry so there is always a non-empty bbox.
+
+    Each slot is a dict with keys ``bbox`` and ``used``.
+    """
+    slots: list[dict[str, Any]] = []
+    slot_h = 100.0 / _SLOT_POOL_SIZE
+
+    for i in range(_SLOT_POOL_SIZE):
+        y1 = i * slot_h
+        y2 = min(100.0, (i + 1) * slot_h)
+
+        # All writable cells in this horizontal strip — full page width
+        strip_writable = [
+            c for c in page_grid.cells
+            if c.writable
+            and c.y_start_percent >= y1
+            and c.y_end_percent   <= y2
+        ]
+        if strip_writable:
+            bbox: dict[str, Any] = {
+                "page":        page_grid.page,
+                "x1_percent":  round(min(c.x_start_percent for c in strip_writable), 2),
+                "y1_percent":  round(min(c.y_start_percent for c in strip_writable), 2),
+                "x2_percent":  round(max(c.x_end_percent   for c in strip_writable), 2),
+                "y2_percent":  round(max(c.y_end_percent   for c in strip_writable), 2),
+            }
+        else:
+            # No writable cells in this strip → right margin as geometric fallback
+            bbox = {
+                "page":        page_grid.page,
+                "x1_percent":  _SLOT_FALLBACK_X1,
+                "y1_percent":  round(y1, 2),
+                "x2_percent":  _SLOT_FALLBACK_X2,
+                "y2_percent":  round(y2, 2),
+            }
+        slots.append({"bbox": bbox, "used": False, "y_center": (y1 + y2) / 2.0})
+
+    return slots
+
+
+def _pop_nearest_slot(pool: list[dict[str, Any]], y_pct: float) -> dict[str, Any] | None:
+    """Return and mark-used the slot whose centre is closest to ``y_pct``."""
+    unused = [s for s in pool if not s["used"]]
+    if not unused:
+        return None
+    best = min(unused, key=lambda s: abs(s["y_center"] - y_pct))
+    best["used"] = True
+    return best["bbox"]
+
+
+def _synthesize_bbox(
+    page_no: int,
+    x1: float,
+    x2: float,
+    y: float,
+    half_h: float = 1.5,
+) -> dict[str, Any]:
+    """Last-resort bbox synthesised purely from annotation coordinates."""
+    return {
+        "page":        page_no,
+        "x1_percent":  round(max(0.0,   x1),          2),
+        "y1_percent":  round(max(0.0,   y - half_h),  2),
+        "x2_percent":  round(min(100.0, x2),          2),
+        "y2_percent":  round(min(100.0, y + half_h),  2),
+    }
+
+
 def _cells_in_rect(
     page_grid: PageCellGrid,
     *,
@@ -398,11 +478,19 @@ def assign_bboxes_to_annotations(
 ) -> None:
     """Mutate each ``annotations[*]`` dict to add ``bbox`` (no ``cell_ids``).
 
-    Annotations are placed sequentially per page; cells used by earlier annotations
-    on the same page are excluded from later placements so two remarks do not share
-    the same bbox when the page has only one large writable run. Each item's
-    ``marking_box_*`` cells are also reserved up-front so annotations never collide
-    with the examiner score box.
+    Every annotation is guaranteed to receive a ``bbox`` via a three-tier strategy:
+
+    Tier 1 — ``assign_cell_ids``: finds writable cells for optimal comment placement.
+    Tier 2 — margin slot pool: pre-partitioned non-overlapping strips in the right/left
+              margin, each sized to fit a comment; nearest unused slot to the annotation
+              y-position is claimed.  40 slots per page (20 right + 20 left) cover any
+              realistic annotation density.
+    Tier 3 — coordinate synthesis: bbox derived directly from annotation coordinates
+              when no page grid is available.
+
+    Cells used by earlier annotations (and the examiner score box) are still excluded
+    from Tier 1 so Tier 1 placements remain collision-free.  Tier 2 slots are
+    independent of the cell-grid consumed set — they rely on pre-partitioned geometry.
     """
     grid_by_page = {g.page: g for g in page_grids}
     lookup_cache: dict[int, dict[str, Cell]] = {
@@ -410,6 +498,11 @@ def assign_bboxes_to_annotations(
     }
     consumed_by_page: dict[int, set[tuple[int, int]]] = {}
     _reserve_marking_box_cells(items, grid_by_page, consumed_by_page)
+
+    # Build slot pools once per page (Tier 2 fallback)
+    slot_pools: dict[int, list[dict[str, Any]]] = {
+        g.page: _build_slot_pool(g) for g in page_grids
+    }
 
     for item in items:
         anns = item.get("annotations")
@@ -423,21 +516,33 @@ def assign_bboxes_to_annotations(
             except (TypeError, ValueError):
                 continue
             page_no = pi + 1
-            grid = grid_by_page.get(page_no)
-            if grid is None:
-                ann.pop("cell_ids", None)
-                continue
+
+            # Extract coordinates early — needed by all fallback tiers
             try:
                 x0 = float(ann.get("x_start_percent", 50.0))
             except (TypeError, ValueError):
                 x0 = 50.0
+            try:
+                x1_end = float(ann.get("x_end_percent", min(100.0, x0 + 20.0)))
+            except (TypeError, ValueError):
+                x1_end = min(100.0, x0 + 20.0)
             try:
                 yp = float(ann.get("y_position_percent", 50.0))
             except (TypeError, ValueError):
                 yp = 50.0
             comment = str(ann.get("comment", "") or "")
             ann.pop("cell_ids", None)
+
+            grid = grid_by_page.get(page_no)
+            if grid is None:
+                # Tier 3: no grid for this page
+                ann["bbox"] = _synthesize_bbox(page_no, x0, x1_end, yp)
+                continue
+
             consumed = consumed_by_page.setdefault(page_no, set())
+
+            # ── Tier 1: cell-grid placement ───────────────────────────────────
+            bbox: dict[str, Any] | None = None
             try:
                 ids = assign_cell_ids(
                     grid,
@@ -459,10 +564,6 @@ def assign_bboxes_to_annotations(
                     ids,
                     cells_by_id=lookup_cache.get(page_no),
                 )
-                if bbox:
-                    ann["bbox"] = bbox
-                else:
-                    ann.pop("bbox", None)
             except Exception:
                 log.warning(
                     "assign_bboxes_to_annotations assign_cell_ids failed page=%s comment_prefix=%r",
@@ -470,6 +571,16 @@ def assign_bboxes_to_annotations(
                     comment[:80],
                     exc_info=True,
                 )
+
+            # ── Tier 2: nearest unused margin slot ────────────────────────────
+            if bbox is None:
+                bbox = _pop_nearest_slot(slot_pools.get(page_no, []), yp)
+
+            # ── Tier 3: coordinate synthesis (slot pool exhausted or no grid) ─
+            if bbox is None:
+                bbox = _synthesize_bbox(page_no, x0, x1_end, yp)
+
+            ann["bbox"] = bbox  # always set; never absent
 
 
 def assign_cell_ids_to_annotations(
