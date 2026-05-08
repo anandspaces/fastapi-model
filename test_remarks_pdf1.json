@@ -1,0 +1,134 @@
+{
+  "pages": [
+    {
+      "page": 1,
+      "remarks": [
+        {
+          "type": "score_circle",
+          "cx": 73,
+          "cy_line": 1,
+          "text": "7/10",
+          "severity": "critical"
+        },
+        {
+          "type": "tick",
+          "line": 3,
+          "zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "exponent_insert",
+          "line": 4,
+          "x_pct": 33,
+          "text": "(define?)",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 2,
+          "x_start": 14,
+          "x_end": 75,
+          "remark": "Introduction lacks a clear thesis statement. UPSC expects precise framing of the central argument in the opening paragraph to anchor the entire answer.",
+          "remark_zone": "right_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 5,
+          "x_start": 14,
+          "x_end": 62,
+          "remark": "Valid observation but entirely unsupported. Back every claim with constitutional provisions, landmark judgments, or official committee recommendations.",
+          "remark_zone": "right_margin",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 7,
+          "x_start": 14,
+          "x_end": 60,
+          "remark": "Argument is one-dimensional. Include counter-perspectives and critical comparative analysis to achieve a balanced, high-scoring answer.",
+          "remark_zone": "right_margin",
+          "severity": "suggestion"
+        },
+        {
+          "type": "circle_remark",
+          "line": 12,
+          "x_start": 20,
+          "x_end": 65,
+          "remark": "Logical inconsistency detected. This claim directly contradicts the argument established in the opening paragraph. Ensure internal consistency throughout to avoid mark deductions.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "page": 2,
+      "remarks": [
+        {
+          "type": "score_circle",
+          "cx": 88,
+          "cy_line": 1,
+          "text": "6/10",
+          "severity": "critical"
+        },
+        {
+          "type": "tick",
+          "line": 2,
+          "zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "exponent_insert",
+          "line": 4,
+          "x_pct": 22,
+          "text": "(define)",
+          "severity": "suggestion"
+        },
+        {
+          "type": "curly_brace",
+          "line_start": 4,
+          "line_end": 9,
+          "zone": "left_margin",
+          "remark": "Weak structure",
+          "severity": "critical"
+        },
+        {
+          "type": "circle_remark",
+          "line": 3,
+          "x_start": 15,
+          "x_end": 60,
+          "remark": "Fundamental conceptual error. Framework applied here misinterprets the core mechanism entirely. Demonstrates a knowledge gap that requires thorough revision of standard references.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 5,
+          "x_start": 14,
+          "x_end": 72,
+          "remark": "Partially relevant but lacks depth. Expand with socio-economic dimensions and support with quantitative data from government reports.",
+          "remark_zone": "left_margin",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 16,
+          "x_start": 15,
+          "x_end": 75,
+          "remark": "Critical factual error in this comparative analysis. Such inaccuracies are heavily penalised in UPSC evaluation. Verify all data against official government sources.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 18,
+          "x_start": 15,
+          "x_end": 75,
+          "remark": "Conclusion is generic and fails to synthesise the main arguments. Rewrite to directly address all dimensions of the question with a concrete forward-looking recommendation for maximum marks.",
+          "remark_zone": "gap",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ]
+}

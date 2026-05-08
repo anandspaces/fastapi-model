@@ -1,0 +1,47 @@
+{
+  "pages": [
+    {
+      "page": 1,
+      "remarks": [
+        {
+          "type": "tick",
+          "line": 3,
+          "zone": "left_margin",
+          "severity": "positive"
+        },
+        {
+          "type": "score_circle",
+          "cx": 8,
+          "cy_line": 1,
+          "text": "7/10",
+          "severity": "positive"
+        },
+        {
+          "type": "underline_remark",
+          "line": 5,
+          "x_start": 15,
+          "x_end": 60,
+          "remark": "Good point",
+          "remark_zone": "right_margin",
+          "severity": "positive"
+        },
+        {
+          "type": "circle_remark",
+          "line": 8,
+          "x_start": 20,
+          "x_end": 45,
+          "remark": "Incomplete",
+          "remark_zone": "gap",
+          "severity": "suggestion"
+        },
+        {
+          "type": "text",
+          "line": 12,
+          "zone": "right_margin",
+          "text": "Needs more detail",
+          "severity": "critical"
+        }
+      ]
+    }
+  ]
+}

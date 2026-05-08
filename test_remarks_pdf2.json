@@ -1,0 +1,125 @@
+{
+  "pages": [
+    {
+      "page": 1,
+      "remarks": [
+        {
+          "type": "score_circle",
+          "cx": 8,
+          "cy_line": 1,
+          "text": "5/10",
+          "severity": "critical"
+        },
+        {
+          "type": "tick",
+          "line": 3,
+          "zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "exponent_insert",
+          "line": 2,
+          "x_pct": 26,
+          "text": "(source?)",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 4,
+          "x_start": 15,
+          "x_end": 60,
+          "remark": "Every argument must be backed by credible evidence. Vague, unsupported assertions are penalised heavily in UPSC GS papers. Always cite official data or reports.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "circle_remark",
+          "line": 6,
+          "x_start": 20,
+          "x_end": 60,
+          "remark": "Factually incorrect claim. Such errors critically damage the entire answer credibility. Verify all factual statements against authoritative sources before writing in examination.",
+          "remark_zone": "gap",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 9,
+          "x_start": 14,
+          "x_end": 65,
+          "remark": "Analysis ends abruptly without addressing the socio-economic implications. Incomplete coverage of the question demand leads to significant mark loss.",
+          "remark_zone": "right_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 14,
+          "x_start": 14,
+          "x_end": 65,
+          "remark": "Paragraph transitions are abrupt throughout. Use linking phrases to maintain coherent logical flow and sustained argumentative quality across the answer.",
+          "remark_zone": "right_margin",
+          "severity": "suggestion"
+        }
+      ]
+    },
+    {
+      "page": 2,
+      "remarks": [
+        {
+          "type": "score_circle",
+          "cx": 64,
+          "cy_line": 1,
+          "text": "6/10",
+          "severity": "critical"
+        },
+        {
+          "type": "tick",
+          "line": 5,
+          "zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "exponent_insert",
+          "line": 10,
+          "x_pct": 21,
+          "text": "(ref?)",
+          "severity": "suggestion"
+        },
+        {
+          "type": "curly_brace",
+          "line_start": 7,
+          "line_end": 12,
+          "zone": "left_margin",
+          "remark": "Lacks coherence",
+          "severity": "critical"
+        },
+        {
+          "type": "circle_remark",
+          "line": 8,
+          "x_start": 20,
+          "x_end": 60,
+          "remark": "Key concept misapplied. Incorrect use of technical terminology undermines the answer credibility and analytical value significantly.",
+          "remark_zone": "left_margin",
+          "severity": "critical"
+        },
+        {
+          "type": "underline_remark",
+          "line": 14,
+          "x_start": 15,
+          "x_end": 72,
+          "remark": "Analytical rigour weakens progressively here. Each paragraph must maintain the same standard of reasoning and evidence quality as the opening.",
+          "remark_zone": "left_margin",
+          "severity": "suggestion"
+        },
+        {
+          "type": "underline_remark",
+          "line": 18,
+          "x_start": 15,
+          "x_end": 75,
+          "remark": "The penultimate paragraph attempts synthesis but the conclusion fails to capitalise on it. Ensure the closing paragraph adds genuine analytical value and directly addresses all question demands.",
+          "remark_zone": "gap",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ]
+}
