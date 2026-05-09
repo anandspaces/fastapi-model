@@ -42,7 +42,10 @@ from remark_cell_layout_service import (
 from cell_layout import validate as validate_cell_layout
 from cell_overlay_renderer import render_overlay_pngs
 from src.cell_response_formatter import build_response_items
-from src.gemini_smart_ocr import smart_ocr_extract_student_answers
+from src.gemini_smart_ocr_v2 import (
+    grade_items_pass3_v2,
+    smart_ocr_extract_student_answers_v2,
+)
 from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
@@ -1454,6 +1457,38 @@ async def post_analyse_smart_ocr(
     except ValueError as e:
         return JSONResponse(_err(str(e)))
 
+    # Cell-native Smart OCR: always attempt v4 grid + labelled JPEGs before OCR
+    # so Pass 1 sees cell IDs; ``smart_ocr_extract_student_answers_v2`` can fall
+    # back internally if overlays are missing.
+    pre_built_grids: list = []
+    ocr_overlay_images: list[bytes] | None = None
+    try:
+        pre_built_grids = await asyncio.to_thread(build_cell_grid, raw)
+        ocr_overlay_images = await asyncio.to_thread(
+            render_overlay_pngs,
+            raw,
+            pre_built_grids,
+            dpi=150,
+            image_format="jpeg",
+            jpeg_quality=85,
+            label_every_cell=True,
+        )
+        log.info(
+            "analyse/smart-ocr pre-ocr overlay built request_id=%s pages=%s payload_kb=%s",
+            rid,
+            len(ocr_overlay_images),
+            sum(len(b) for b in ocr_overlay_images) // 1024,
+        )
+    except Exception as overlay_pre_exc:
+        log.warning(
+            "analyse/smart-ocr pre-ocr overlay failed request_id=%s: %s — "
+            "OCR will request overlays inside the worker if possible",
+            rid,
+            overlay_pre_exc,
+        )
+        pre_built_grids = []
+        ocr_overlay_images = None
+
     # --- Stage 1+2: OCR + structure ---
     tmp: Path | None = None
     try:
@@ -1461,12 +1496,15 @@ async def post_analyse_smart_ocr(
         tmp = Path(tmp_name)
         with os.fdopen(fd, "wb") as out:
             out.write(raw)
+        grids_kw = pre_built_grids if pre_built_grids else None
         result = await asyncio.to_thread(
-            smart_ocr_extract_student_answers,
+            smart_ocr_extract_student_answers_v2,
             tmp,
             api_key,
             lang,
             request_id=rid,
+            overlay_images=ocr_overlay_images,
+            grids=grids_kw,
         )
     except ValueError as e:
         log.warning("analyse/smart-ocr rejected request_id=%s: %s", rid, e)
@@ -1481,6 +1519,8 @@ async def post_analyse_smart_ocr(
             except OSError:
                 log.warning("analyse/smart-ocr temp unlink failed path=%s", tmp)
 
+    flat_blocks_v2: dict | None = result.pop("_flat_blocks", None)
+    v2_overlay_jpegs: list[bytes] | None = result.pop("_overlay_jpegs", None)
     page_count = result.get("page_count")
     items = result.get("items", [])
     if not isinstance(page_count, int) or page_count < 1:
@@ -1505,10 +1545,23 @@ async def post_analyse_smart_ocr(
         len(items),
     )
 
-    # Cell grid v4: 12pt cells, centered margins, runs + 2-D regions + meta.
-    # Runs concurrently with Stage 3 grading (when modelId set).
-    grid_task = asyncio.create_task(asyncio.to_thread(build_cell_grid, raw))
+    # Cell grid v4: reuse the pre-built grid when overlay mode is on; otherwise
+    # build once for placement / Smart-OCR v2 grading.
     remark_font = REMARK_FONTNAME_HI if lang == "hi" else REMARK_FONTNAME_EN
+    if pre_built_grids:
+        async def _resolved_grids() -> list:
+            return pre_built_grids
+        grid_task = asyncio.create_task(_resolved_grids())
+    else:
+        grid_task = asyncio.create_task(asyncio.to_thread(build_cell_grid, raw))
+
+    try:
+        page_grids = await grid_task
+    except Exception as grid_exc:
+        log.warning(
+            "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
+        )
+        page_grids = []
 
     # --- Stage 3: grading (only when modelId provided) ---
     if answer_model:
@@ -1520,48 +1573,75 @@ async def post_analyse_smart_ocr(
             )
             items_to_grade = student_items_for_grading(items)
 
-            # Cell-overlay grading prompt (env-gated). Renders one
-            # cell-labelled JPEG per page and attaches them to the eval call,
-            # letting Gemini emit cell-ID-native placement directly. Falls
-            # back to the legacy percent-coord prompt on render/grid failure.
-            overlay_images: list[bytes] | None = None
-            use_overlay_prompt = os.environ.get(
-                "SMART_OCR_OVERLAY_PROMPT", ""
-            ).strip().lower() in ("1", "true", "yes", "on")
-            if use_overlay_prompt:
+            # Grading: reuse JPEGs from pre-OCR pass, response stash, or render once.
+            overlay_images: list[bytes] | None = ocr_overlay_images or v2_overlay_jpegs
+            if overlay_images:
+                log.info(
+                    "analyse/smart-ocr grading overlays request_id=%s pages=%s",
+                    rid,
+                    len(overlay_images),
+                )
+            elif page_grids:
                 try:
-                    _grids_for_overlay = await grid_task
                     overlay_images = await asyncio.to_thread(
                         render_overlay_pngs,
-                        raw, _grids_for_overlay,
-                        dpi=150, image_format="jpeg", jpeg_quality=85,
+                        raw,
+                        page_grids,
+                        dpi=150,
+                        image_format="jpeg",
+                        jpeg_quality=85,
                         label_every_cell=True,
                     )
                     log.info(
-                        "analyse/smart-ocr overlay-prompt request_id=%s pages=%s payload_kb=%s",
-                        rid, len(overlay_images),
+                        "analyse/smart-ocr grading overlay render request_id=%s pages=%s payload_kb=%s",
+                        rid,
+                        len(overlay_images),
                         sum(len(b) for b in overlay_images) // 1024,
                     )
                 except Exception as overlay_exc:
                     log.warning(
                         "analyse/smart-ocr overlay render failed request_id=%s: %s",
-                        rid, overlay_exc,
+                        rid,
+                        overlay_exc,
                     )
                     overlay_images = None
-                    use_overlay_prompt = False
 
-            ev_list = await asyncio.to_thread(
-                evaluate_student_answers_against_model,
-                api_key,
-                title,
-                teacher_instructions,
-                items_to_grade,
-                request_id=rid,
-                check_level=check_canon,
-                overlay_images=overlay_images,
-                use_overlay_prompt=use_overlay_prompt,
-            )
-            items = merge_evaluations_into_items(items, ev_list)
+            use_overlay_prompt = bool(overlay_images)
+            overlay_for_pass3 = overlay_images or v2_overlay_jpegs
+
+            if flat_blocks_v2 and overlay_for_pass3:
+                ev_list = await asyncio.to_thread(
+                    grade_items_pass3_v2,
+                    api_key,
+                    title,
+                    title,
+                    questions,
+                    items_to_grade,
+                    page_grids,
+                    flat_blocks_v2,
+                    overlay_for_pass3,
+                    request_id=rid,
+                    check_level=check_canon,
+                )
+                items = merge_evaluations_into_items(items, ev_list)
+            else:
+                log.warning(
+                    "analyse/smart-ocr grading fallback to legacy evaluator "
+                    "(missing flat_blocks or overlay JPEGs) request_id=%s",
+                    rid,
+                )
+                ev_list = await asyncio.to_thread(
+                    evaluate_student_answers_against_model,
+                    api_key,
+                    title,
+                    teacher_instructions,
+                    items_to_grade,
+                    request_id=rid,
+                    check_level=check_canon,
+                    overlay_images=overlay_images,
+                    use_overlay_prompt=use_overlay_prompt,
+                )
+                items = merge_evaluations_into_items(items, ev_list)
             log.info(
                 "analyse/smart-ocr eval ok request_id=%s model_id=%s merged_items=%s",
                 rid,
@@ -1572,16 +1652,9 @@ async def post_analyse_smart_ocr(
             log.exception(
                 "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid
             )
-            try:
-                _grading_fail_grids = await grid_task
-            except Exception as grid_exc:
-                log.warning(
-                    "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
-                )
-                _grading_fail_grids = []
             assign_cell_ids_v4(
                 items,
-                _grading_fail_grids,
+                page_grids,
                 font_size_pts=REMARK_FONT_SIZE_PTS,
                 fontname=remark_font,
                 max_wrap_rows=REMARK_MAX_WRAP_ROWS,
@@ -1589,7 +1662,7 @@ async def post_analyse_smart_ocr(
             # skipped_pages reads start_page/end_page off the placer's items;
             # compute it BEFORE reshaping (the wire shape drops those fields).
             skipped_pages_fail = _smart_ocr_skipped_pages(page_count, items)
-            response_items_fail = build_response_items(items, _grading_fail_grids)
+            response_items_fail = build_response_items(items, page_grids)
             # Don't fail the whole response — return OCR items with error note
             return JSONResponse(
                 _ok(
@@ -1600,17 +1673,10 @@ async def post_analyse_smart_ocr(
                     checkLevel=check_canon,
                     gradingError=str(e),
                     skippedPages=skipped_pages_fail,
-                    cellGridMeta=cell_grid_meta_payload(_grading_fail_grids),
+                    cellGridMeta=cell_grid_meta_payload(page_grids),
                 )
             )
 
-    try:
-        page_grids = await grid_task
-    except Exception as grid_exc:
-        log.warning(
-            "analyse/smart-ocr cell grid failed request_id=%s: %s", rid, grid_exc
-        )
-        page_grids = []
     assign_cell_ids_v4(
         items,
         page_grids,

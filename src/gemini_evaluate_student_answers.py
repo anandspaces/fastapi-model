@@ -590,6 +590,8 @@ _GRADING_KEYS = (
     "student_answer_summary",
     "feedback",
     "annotations",
+    "answer_span",
+    "marking",
 )
 
 # OCR layout fields — absent when this question never appeared in the structure pass output.
@@ -708,6 +710,20 @@ def _reseed_annotations_from_ocr_coords(item: dict[str, Any]) -> None:
     """
     anns = item.get("annotations")
     if not isinstance(anns, list) or not anns:
+        return
+
+    # Smart-OCR v2 / cell-overlay path — placement is already cell-native.
+    if any(
+        isinstance(a, dict)
+        and (
+            (isinstance(a.get("comment_rows"), list) and len(a.get("comment_rows") or []) > 0)
+            or (
+                isinstance((a.get("anchor") or {}).get("rows"), list)
+                and len((a.get("anchor") or {}).get("rows") or []) > 0
+            )
+        )
+        for a in anns
+    ):
         return
 
     for ann in anns:

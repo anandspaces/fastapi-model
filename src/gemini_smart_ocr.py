@@ -466,7 +466,7 @@ def _normalize_flat_item(
     }
 
 
-def _parse_structure_sections(raw: str, total_pages: int) -> list[dict[str, Any]]:
+def _parse_structure_sections(raw: str, total_pages: int, *, has_overlay: bool = False) -> list[dict[str, Any]]:
     last_err: Exception | None = None
     parsed: Any = None
     for candidate in (_strip_json_fence(raw), _repair_json(raw)):
@@ -500,6 +500,16 @@ def _parse_structure_sections(raw: str, total_pages: int) -> list[dict[str, Any]
             if not isinstance(row, dict):
                 continue
             norm = _normalize_flat_item(row, total_pages, section_name)
+            # When overlay images were sent, Gemini may emit cell-ID fields
+            # (answer_span / marking) alongside percent coords. Preserve them
+            # so cell_response_formatter.py can use the native cell IDs directly.
+            if has_overlay:
+                answer_span = row.get("answer_span")
+                if isinstance(answer_span, list) and answer_span:
+                    norm["answer_span"] = answer_span
+                marking = row.get("marking")
+                if isinstance(marking, dict) and marking:
+                    norm["marking"] = marking
             out.append(norm)
     if not out:
         raise ValueError("No question-answer blocks detected.")
@@ -601,12 +611,20 @@ def _ocr_single_page(
     total_pages: int,
     language: str,
     page_type: str,
+    *,
+    overlay_jpeg: bytes | None = None,
 ) -> str:
     client = genai.Client(api_key=api_key)
     prompt = _ocr_prompt_for_page_type(page_type, page_num, total_pages, language)
+    # When an overlay JPEG is provided (cell grid drawn on page), send it instead
+    # of the plain PNG so Gemini can see cell IDs as a spatial reference during OCR.
+    if overlay_jpeg is not None:
+        img_data, img_mime = overlay_jpeg, "image/jpeg"
+    else:
+        img_data, img_mime = png, "image/png"
     parts = [
         types.Part.from_text(text=prompt),
-        types.Part.from_bytes(data=png, mime_type="image/png"),
+        types.Part.from_bytes(data=img_data, mime_type=img_mime),
     ]
     cfg = types.GenerateContentConfig(
         temperature=0.0,
@@ -642,6 +660,48 @@ def _ocr_single_page(
     return f"=== PAGE {page_num} ===\n{page_text}"
 
 
+_STRUCTURE_OVERLAY_ADDENDUM = """
+═════════════════════════════════════════════════════════════════════════
+CELL-GRID OVERLAY (images follow — one per page in document order)
+═════════════════════════════════════════════════════════════════════════
+The images attached after this message show the SAME answer sheet pages
+with an Excel-style cell grid overlaid. Every cell shows its ID
+(A1, B1 … Z1, AA1, AB1 …). GREEN-tinted cells are writable (no
+handwriting underneath); white cells contain ink or printed text.
+
+For EACH question you emit, ALSO include these two cell-ID fields
+IN ADDITION to the percent-coordinate fields (both are required):
+
+  "answer_span": [
+    {"page": 2, "top_cell": "A11", "bottom_cell": "X35"},
+    {"page": 3, "top_cell": "A1",  "bottom_cell": "X32"}
+  ]
+  • One entry per PDF page that contains student ink for this question.
+  • top_cell  = leftmost column (always col A) at the first row that has
+    student handwriting (not printed question stem).
+  • bottom_cell = rightmost column at the last row with student ink.
+
+  "marking": {
+    "page": 2,
+    "score_range": "Q20",
+    "score_box_range": "M20:T21"
+  }
+  • page — same as marking_page.
+  • score_range — single GREEN cell ID closest to the marking_x/y anchor
+    (use the nearest writable cell in that vicinity).
+  • score_box_range — range of consecutive GREEN cells forming a natural
+    score-entry box (e.g. "M20:T21" for a 2-row, 8-col run).
+
+Rules:
+- Cell IDs come directly from what you see on the overlay image.
+- Coordinates must not cross pages; each span/mark belongs to one page.
+- For unattempted questions (student_answer == "") set answer_span to []
+  and marking to null.
+- Do NOT emit percent and cell fields that contradict each other — the
+  cell positions must match the percent positions.
+"""
+
+
 def _structure_qa(
     client: genai.Client,
     pages_payload_json: str,
@@ -649,6 +709,7 @@ def _structure_qa(
     total_pages: int,
     *,
     expected_questions: int | None = None,
+    overlay_images: list[bytes] | None = None,
 ) -> list[dict[str, Any]]:
     lang_note = (
         "Text is Hindi/English mixed; preserve wording in student_answer when present."
@@ -753,15 +814,27 @@ CRITICAL JSON:
 - Return one object: {{"sections":[{{"section_name":"...","questions":[...]}}]}}
 """
 
-    parts = [
+    if overlay_images:
+        prompt += _STRUCTURE_OVERLAY_ADDENDUM
+
+    parts: list[types.Part] = [
         types.Part.from_text(text=prompt),
         types.Part.from_text(text=pages_payload_json),
     ]
+    # Attach overlay images (one per page) after the text parts so Gemini can
+    # see the cell grid as a spatial reference when emitting answer_span/marking.
+    if overlay_images:
+        for img in overlay_images:
+            parts.append(types.Part.from_bytes(data=img, mime_type="image/jpeg"))
+
+    # When overlay images are present we drop response_schema enforcement so
+    # Gemini can freely emit the extended answer_span / marking cell-ID fields
+    # alongside the standard percent-coordinate fields.
     cfg = types.GenerateContentConfig(
         temperature=0.1,
         max_output_tokens=65536,
         response_mime_type="application/json",
-        response_schema=_STRUCTURE_ROOT_SCHEMA,
+        **({"response_schema": _STRUCTURE_ROOT_SCHEMA} if not overlay_images else {}),
     )
     last_err: Exception | None = None
     for attempt in range(1, 3):
@@ -774,7 +847,7 @@ CRITICAL JSON:
         if not raw:
             raise ValueError("Structure pass returned an empty response.")
         try:
-            return _parse_structure_sections(raw, total_pages)
+            return _parse_structure_sections(raw, total_pages, has_overlay=bool(overlay_images))
         except ValueError as e:
             last_err = e
             log.warning("structure_qa parse attempt %s/2 failed: %s", attempt, e)
@@ -790,6 +863,7 @@ def _structure_qa_with_fallback(
     total_pages: int,
     *,
     expected_questions: int | None = None,
+    overlay_images: list[bytes] | None = None,
 ) -> list[dict[str, Any]]:
     pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
     rows = _structure_qa(
@@ -798,6 +872,7 @@ def _structure_qa_with_fallback(
         language,
         total_pages,
         expected_questions=expected_questions,
+        overlay_images=overlay_images,
     )
     if expected_questions and len(rows) < max(1, int(expected_questions * 0.8)):
         pages = pages_payload.get("pages", [])
@@ -811,12 +886,17 @@ def _structure_qa_with_fallback(
         mid = len(pages) // 2
         first = {"pages": pages[:mid]}
         second = {"pages": pages[mid:]}
+        # On split-retry, pass overlay images for the half pages if available.
+        # Slice overlays by mid to keep page/image alignment.
+        ov1 = overlay_images[:mid] if overlay_images else None
+        ov2 = overlay_images[mid:] if overlay_images else None
         rows1 = _structure_qa(
             client,
             json.dumps(first, ensure_ascii=False),
             language,
             total_pages,
             expected_questions=None,
+            overlay_images=ov1,
         )
         rows2 = _structure_qa(
             client,
@@ -824,6 +904,7 @@ def _structure_qa_with_fallback(
             language,
             total_pages,
             expected_questions=None,
+            overlay_images=ov2,
         )
         rows = rows1 + rows2
         rows.sort(key=_structure_item_sort_key)
@@ -895,8 +976,15 @@ def smart_ocr_extract_student_answers(
     language: str,
     *,
     request_id: str,
+    overlay_images: list[bytes] | None = None,
 ) -> dict[str, Any]:
     """Classify pages → type-aware OCR → dedupe → structure into items.
+
+    ``overlay_images``: when provided (one JPEG per page, in document order),
+    the grid-overlay image is sent to Gemini for each OCR page instead of the
+    plain raster so Gemini can reference cell IDs.  The structure pass also
+    receives all overlay images and is asked to emit ``answer_span`` and
+    ``marking`` in cell-ID form in addition to the legacy percent coordinates.
 
     Cover / intro segregation is done in the structure (phase 2) Gemini pass — not here.
 
@@ -968,8 +1056,11 @@ def smart_ocr_extract_student_answers(
     def _ocr_job(idx: int) -> tuple[int, str]:
         pno = idx + 1
         pt = classifications[idx]
+        # Use the per-page overlay JPEG when available so Gemini sees cell IDs.
+        oj = overlay_images[idx] if overlay_images and idx < len(overlay_images) else None
         block = _ocr_single_page(
-            api_key, png_pages[idx], pno, total_pages, language, pt
+            api_key, png_pages[idx], pno, total_pages, language, pt,
+            overlay_jpeg=oj,
         )
         log.info(
             "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
@@ -1024,6 +1115,7 @@ def smart_ocr_extract_student_answers(
         language,
         total_pages,
         expected_questions=expected_questions,
+        overlay_images=overlay_images,
     )
 
     log.info(

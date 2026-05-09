@@ -824,6 +824,39 @@ def draw_cell_grid_overlay_v4(
     return out
 
 
+def detect_marking_boxes(
+    pdf_bytes: bytes,
+    grids: list[PageCellGrid],
+) -> dict[int, str]:
+    """Heuristic printed score-box regions → Excel-style cell range per page.
+
+    ``pdf_bytes`` is reserved for future CV refinement (rectangle detection);
+    currently unused — regions come from v4 :class:`WritableRegion` metadata.
+
+    Picks a writable region whose centroid sits on the right half of the page
+    (typical UPSC score-entry strip). Returns ``page_no -> bbox_range_id``.
+    """
+    del pdf_bytes  # reserved for CV hook
+    hints: dict[int, str] = {}
+    for g in grids:
+        candidates: list[WritableRegion] = []
+        for reg in g.regions:
+            cx = (reg.x_start_percent + reg.x_end_percent) / 2.0
+            cy = (reg.y_start_percent + reg.y_end_percent) / 2.0
+            if cx >= 48.0 and 18.0 <= cy <= 82.0:
+                candidates.append(reg)
+        if not candidates:
+            continue
+        candidates.sort(
+            key=lambda r: (
+                -r.cell_count,
+                -abs(50.0 - (r.y_start_percent + r.y_end_percent) / 2.0),
+            )
+        )
+        hints[g.page] = candidates[0].bbox_range_id
+    return hints
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 

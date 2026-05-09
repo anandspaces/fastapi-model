@@ -36,6 +36,8 @@ from typing import Any
 
 from cell_grid_service_v4 import PageCellGrid, cell_id_from_rc, rc_from_cell_id
 
+from src.gemini_smart_ocr_v2.snap import cells_from_range_strings
+
 # Comment font is rendered in the [11, 15] pt range when annotations are
 # painted onto the answer sheet. Default applies when the placer does not
 # choose explicitly.
@@ -99,6 +101,16 @@ def _range_from_cells(cell_ids: list[str]) -> str | None:
 # ── Per-section builders ────────────────────────────────────────────────────
 
 
+def _sanitize_row_tokens(rows: list[str], grid: PageCellGrid) -> list[str]:
+    """Drop range tokens that do not resolve to any in-grid cell."""
+    out: list[str] = []
+    for r in rows:
+        s = str(r).strip()
+        if s and cells_from_range_strings(grid, [s]):
+            out.append(s)
+    return out
+
+
 def _build_answer_span(
     item: dict[str, Any], grids_by_page: dict[int, PageCellGrid]
 ) -> list[dict[str, Any]]:
@@ -120,7 +132,16 @@ def _build_answer_span(
             page = span.get("page")
             rows = span.get("rows")
             if isinstance(rows, list) and rows:
-                out.append({"page": int(page), "rows": [str(r) for r in rows]})
+                try:
+                    pg = int(page)
+                except (TypeError, ValueError):
+                    pg = 1
+                g = grids_by_page.get(pg)
+                row_strs = [str(r) for r in rows]
+                if g is not None:
+                    row_strs = _sanitize_row_tokens(row_strs, g)
+                if row_strs:
+                    out.append({"page": pg, "rows": row_strs})
                 continue
             top_cell = span.get("top_cell")
             bot_cell = span.get("bottom_cell")
@@ -247,7 +268,10 @@ def _normalise_anchor(raw: Any) -> dict[str, Any]:
     return out
 
 
-def _build_annotation(ann: dict[str, Any]) -> dict[str, Any]:
+def _build_annotation(
+    ann: dict[str, Any],
+    grids_by_page: dict[int, PageCellGrid] | None = None,
+) -> dict[str, Any]:
     """Per-annotation wire shape. Two source shapes accepted:
 
     1. Gemini cell-overlay path: ``page`` (1-indexed), ``comment_rows[]``
@@ -280,6 +304,10 @@ def _build_annotation(ann: dict[str, Any]) -> dict[str, Any]:
     comment_rows = ann.get("comment_rows")
     if isinstance(comment_rows, list) and comment_rows:
         rows = [str(r) for r in comment_rows]
+        if grids_by_page:
+            g = grids_by_page.get(page)
+            if g is not None:
+                rows = _sanitize_row_tokens(rows, g)
         out["comment_rows"] = rows
         all_cells: list[str] = []
         for r in rows:
@@ -322,7 +350,7 @@ def build_response_items(
         new["marking"] = _build_marking(item, grids_by_page)
         anns = item.get("annotations") or []
         new["annotations"] = [
-            _build_annotation(a) for a in anns if isinstance(a, dict)
+            _build_annotation(a, grids_by_page) for a in anns if isinstance(a, dict)
         ]
         out.append(new)
     return out

@@ -11,11 +11,12 @@ import logging
 import os
 import tempfile
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from cell_grid_service import analyze_pdf_cell_grid
+from cell_overlay_renderer import render_overlay_pngs
+
+from src.cell_grid_service import build_cell_grid
 from remark_cell_layout_service import (
     REMARK_FONTNAME_EN,
     REMARK_FONTNAME_HI,
@@ -29,7 +30,7 @@ from src.gemini_evaluate_student_answers import (
     merge_evaluations_into_items,
     student_items_for_grading,
 )
-from src.gemini_smart_ocr import smart_ocr_extract_student_answers
+from src.gemini_smart_ocr_v2 import grade_items_pass3_v2, smart_ocr_extract_student_answers_v2
 
 log = logging.getLogger(__name__)
 
@@ -86,15 +87,39 @@ def run_copy_check(
     remark_font = REMARK_FONTNAME_HI if lang == "hi" else REMARK_FONTNAME_EN
 
     tmp: Path | None = None
+    page_grids: list[Any] = []
+    overlay_jpegs: list[bytes] | None = None
     try:
         fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
         tmp = Path(tmp_name)
         with os.fdopen(fd, "wb") as fh:
             fh.write(pdf_bytes)
 
-        # Stage 1+2: OCR + structure (includes marking_box injection internally)
-        log.info("copy_checker[%s] starting smart-ocr", rid)
-        ocr_result = smart_ocr_extract_student_answers(tmp, api_key, lang, request_id=rid)
+        log.info("copy_checker[%s] building cell grid + overlays", rid)
+        try:
+            page_grids = build_cell_grid(pdf_bytes)
+            overlay_jpegs = render_overlay_pngs(
+                pdf_bytes,
+                page_grids,
+                dpi=_CELL_GRID_DPI,
+                image_format="jpeg",
+                jpeg_quality=85,
+                label_every_cell=True,
+            )
+        except Exception:
+            log.exception("copy_checker[%s] grid/overlay failed — OCR may rebuild internally", rid)
+            page_grids = []
+            overlay_jpegs = None
+
+        log.info("copy_checker[%s] starting smart-ocr v2", rid)
+        ocr_result = smart_ocr_extract_student_answers_v2(
+            tmp,
+            api_key,
+            lang,
+            request_id=rid,
+            overlay_images=overlay_jpegs,
+            grids=page_grids if page_grids else None,
+        )
     finally:
         if tmp is not None:
             try:
@@ -102,29 +127,51 @@ def run_copy_check(
             except OSError:
                 pass
 
-    page_count: int = ocr_result.get("page_count", 0)
-    items: list[dict[str, Any]] = ocr_result.get("items", [])
+    flat_blocks = ocr_result.pop("_flat_blocks", None)
+    v2_ov = ocr_result.pop("_overlay_jpegs", None)
+    page_count = int(ocr_result.get("page_count") or 0)
+    items = list(ocr_result.get("items") or [])
     log.info("copy_checker[%s] ocr ok pages=%s items=%s", rid, page_count, len(items))
 
-    # Cell-grid analysis runs in a thread so it overlaps with grading (when present)
-    grid_pool = ThreadPoolExecutor(max_workers=1)
-    grid_future = grid_pool.submit(analyze_pdf_cell_grid, pdf_bytes, dpi=_CELL_GRID_DPI)
+    if not page_grids:
+        try:
+            page_grids = build_cell_grid(pdf_bytes)
+        except Exception:
+            log.warning("copy_checker[%s] late grid build failed", rid)
+            page_grids = []
 
-    # Stage 3: optional grading
+    # Stage 3: optional grading (same strategy as POST /analyse/smart-ocr)
     if answer_model:
         try:
             questions = answer_model.get("questions") or []
             title = answer_model.get("title") or "General"
             teacher_instructions = format_answer_model_as_teacher_instructions(questions, title)
             items_to_grade = student_items_for_grading(items)
-            ev_list = evaluate_student_answers_against_model(
-                api_key,
-                title,
-                teacher_instructions,
-                items_to_grade,
-                request_id=rid,
-                check_level=check_level,
-            )
+            overlay_for_pass3 = overlay_jpegs if overlay_jpegs is not None else v2_ov
+            if flat_blocks and overlay_for_pass3:
+                ev_list = grade_items_pass3_v2(
+                    api_key,
+                    title,
+                    title,
+                    questions,
+                    items_to_grade,
+                    page_grids,
+                    flat_blocks,
+                    overlay_for_pass3,
+                    request_id=rid,
+                    check_level=check_level,
+                )
+            else:
+                ev_list = evaluate_student_answers_against_model(
+                    api_key,
+                    title,
+                    teacher_instructions,
+                    items_to_grade,
+                    request_id=rid,
+                    check_level=check_level,
+                    overlay_images=overlay_for_pass3,
+                    use_overlay_prompt=bool(overlay_for_pass3),
+                )
             items = merge_evaluations_into_items(items, ev_list)
             log.info("copy_checker[%s] grading ok merged=%s", rid, len(items))
         except Exception:
@@ -132,7 +179,6 @@ def run_copy_check(
 
     # Annotation bbox placement
     try:
-        page_grids = grid_future.result()
         assign_bboxes_to_annotations(
             items,
             page_grids,
@@ -143,8 +189,6 @@ def run_copy_check(
         log.info("copy_checker[%s] bbox assignment done", rid)
     except Exception:
         log.exception("copy_checker[%s] bbox assignment failed", rid)
-    finally:
-        grid_pool.shutdown(wait=False)
 
     return {
         "items": items,

@@ -782,6 +782,36 @@ def assign_cell_ids_v4(
         for ann in anns:
             if not isinstance(ann, dict):
                 continue
+            # Cell-overlay / Smart-OCR v2: ``comment_rows`` already resolved to cells.
+            cr = ann.get("comment_rows")
+            if isinstance(cr, list) and cr:
+                from src.gemini_smart_ocr_v2.snap import ordered_cell_ids_from_ranges
+
+                if ann.get("page") is not None:
+                    try:
+                        page_no = int(ann["page"])
+                    except (TypeError, ValueError):
+                        page_no = 1
+                else:
+                    try:
+                        page_no = int(ann.get("page_index", 0)) + 1
+                    except (TypeError, ValueError):
+                        page_no = 1
+                grid = grid_by_page.get(page_no)
+                if grid is None:
+                    ann["cell_ids"] = []
+                    ann["range_id"] = ""
+                    ann["placement_tier"] = _TIER_SYNTH
+                    continue
+                ids = ordered_cell_ids_from_ranges(grid, [str(x) for x in cr])
+                ann["page_index"] = page_no - 1
+                ann["cell_ids"] = ids
+                ann["range_id"] = _v4_range_id(ids) if ids else ""
+                ann["placement_tier"] = _TIER_REGION if ids else _TIER_SYNTH
+                bb = _v4_bbox_from_cells(grid, ids)
+                ann["bbox"] = bb if bb else _v4_synth_bbox(page_no, 50.0, 50.0, 50.0)
+                continue
+
             try:
                 pi = int(ann.get("page_index", 0))
             except (TypeError, ValueError):

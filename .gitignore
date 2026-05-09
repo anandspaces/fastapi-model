@@ -7,3 +7,5 @@ data/
 *.png
 *.jpeg
 *.jpg
+
+test-smart-ocr/
