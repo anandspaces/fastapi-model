@@ -77,7 +77,7 @@ def _build_pass3_prompt(
 You receive ONE student's answer for ONE question. Spatial vocabulary:
 - Row ranges like "E13:S13" mean columns E through S on row 13.
 - FREE_PAGE_N lists writable cell ranges where COMMENT text may go.
-- OCCUPIED_PAGE_N lists cells covered by this student's handwriting for this question — use only these for anchor marks (underline/circle/tick…).
+- OCCUPIED_PAGE_N lists cells covered by this student's handwriting for this question — use these (plus adjacent FREE rows when the anchor type requires it, e.g. underline beneath the text) for anchor marks (underline/ellipse/tick…).
 
 {strict_line}
 
@@ -89,9 +89,31 @@ MARKING RULES:
 ANNOTATION RULES:
 - Each annotation: page (1-based), comment, is_positive, comment_font_pts [11–15],
   comment_rows (ONLY cells from FREE sets — list of single-row ranges),
-  anchor: {{ "type": ..., "rows": [...] }} — rows must sit on OCCUPIED handwriting cells.
+  anchor: {{ "type": ..., "rows": [...] }}.
 - No two annotations on the same page may share any comment_rows cell.
 - answer_span and marking are FIXED — do NOT emit them (Python merges resolved spans).
+
+ANNOTATION COUNT (per-page floor):
+- For EACH page that contains this student's handwriting, emit 3-4 annotations on that page.
+  A 2-page answer therefore yields 6-8 annotations total; a 1-page answer 3-4.
+- Distribute the annotations across the page (top, middle, bottom) so feedback covers the full answer, not only the start.
+
+ANCHOR PLACEMENT (use the overlay JPEG to choose cells precisely):
+- "ellipse"   (used to be "circle" — always emit "ellipse" now)
+  Rows MUST be TIGHT to the specific word/phrase being ringed — only the columns whose cells contain that word's ink.
+  Do NOT span the whole writing row. Read the overlay to find the exact leftmost and rightmost cells of the word and emit ONE single-row range that hugs it.
+  Example: a single word "anger" sitting in cells M59-R59 -> "rows": ["M59:R59"].
+  Wrong: "rows": ["M59:AT59"] (covers the entire row, not just the word).
+- "underline"
+  Rows MUST sit in the cell row DIRECTLY BENEATH the underlined writing — the underline lives in the row below the word(s), not on the same row.
+  If the writing is on row 31, anchor.rows should reference row 32 (e.g., "L32:AS32"), with column span tight to the underlined phrase only.
+  Pick the row-below cells even if they are FREE (empty) — the underline is meant to occupy that empty band beneath the text.
+- "tick"
+  Rows are 1-3 cells either at the very end of the praised writing row or in the adjacent margin column on that row.
+- "none"
+  Omit "rows" (or pass an empty array). Use sparingly — prefer a real anchor when feedback refers to a specific phrase.
+
+DO NOT emit "circle" — use "ellipse".
 
 TEACHER KEY (this question only):
 {teacher_block}

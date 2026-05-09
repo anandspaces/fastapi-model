@@ -19,7 +19,7 @@ and emits the cell-ID-native item shape:
         "comment_font_pts": float,                 // [11.0, 15.0]
         "comment_range": "A1:B2",
         "anchor": {
-          "type": "circle"|"tick"|"underline"|"curly_brace"|"exponent_caret"|"none",
+          "type": "ellipse"|"tick"|"underline"|"curly_brace"|"exponent_caret"|"none",
           "range": "A1:B2",                        // optional when type="none"
           "extra": { ... }                         // type-specific
         }
@@ -243,7 +243,7 @@ def _build_marking(
 
 
 _VALID_ANCHOR_TYPES = (
-    "circle", "tick", "underline", "curly_brace", "exponent_caret", "none",
+    "ellipse", "tick", "underline", "curly_brace", "exponent_caret", "none",
 )
 
 
@@ -256,6 +256,8 @@ def _normalise_anchor(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"type": "none"}
     atype = raw.get("type")
+    if atype == "circle":
+        atype = "ellipse"
     if atype not in _VALID_ANCHOR_TYPES:
         return {"type": "none"}
     out: dict[str, Any] = {"type": atype}

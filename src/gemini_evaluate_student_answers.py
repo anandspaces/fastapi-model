@@ -203,7 +203,7 @@ student's content — anchor.rows MAY include white (non-writable) cells.
 
   type             rows shape                           extra (required)
   ──────────────  ───────────────────────────────────  ─────────────────────
-  circle          1 row, 2–6 cols                      —
+  ellipse         1 row, 2–6 cols                      —
   tick            1 row, 1 cell                        —
   underline       1 row, N cols (the inked sentence)   —
   curly_brace     N rows, 1 col, in margin             side: "left"|"right"
@@ -211,7 +211,7 @@ student's content — anchor.rows MAY include white (non-writable) cells.
   none            (omit anchor.rows entirely)          —
 
 When to use each:
-  - circle           → wrong word, misspelling, phrase to highlight
+  - ellipse          → wrong word, misspelling, phrase to highlight
   - tick             → unambiguous merit (use SPARINGLY)
   - underline        → a sentence/clause to emphasise or correct
   - curly_brace      → paragraph-level remark spanning multiple rows
