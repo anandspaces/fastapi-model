@@ -539,8 +539,8 @@ def _normalize_final_response(data: dict[str, Any]) -> tuple[dict[str, Any], lis
                 ann["page"] = 1
             if "comment" not in ann:
                 ann["comment"] = ""
-            if "comment_range" not in ann and "comment_rows" not in ann:
-                ann["comment_range"] = ""
+            if "comment_rows" not in ann:
+                ann["comment_rows"] = []
             if "anchor" not in ann:
                 ann["anchor"] = {"type": "none"}
             elif isinstance(ann["anchor"], dict) and "type" not in ann["anchor"]:

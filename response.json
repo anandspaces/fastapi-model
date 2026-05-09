@@ -1,0 +1,439 @@
+{
+  "status": 1,
+  "message": "Smart OCR complete.",
+  "data": {
+      "pageCount": 4,
+      "items": [
+          {
+              "question_id": 1,
+              "question": "Que 1) The role of emotional intelligence in value formation is often overlooked. In this context analyze the relationship between emotional intelligence and ethical decision-making. (8 Marks)",
+              "student_answer": "Ans: Value formation is a moral process, not an emotional process, and is linked with family upbringing environment education, and society but we cannot overlook the role of emotional intelligence in developing it.\n\nRole of emotional intelligence in value formation can be seen as:\n\n1. It helps in conflict resolution. Emotionally intelligent people manage their anger frustration in peer pressure.\n\n2. Helps in ethical decision making: Emotionally intelligent officer rather takes more stable\n\ndecision than a normal person\n3. Improves communication\nunderstanding problems.\n\nIt is overlooked because of\nthe following reasons\n\n1. Society is more focus on money,\nfame and success\n\n2. Moral values are only taught\nin text books, not practiced.\n\n3. Traditional practices are just\nfor show off like for making\nreels, fb, instagram rather than\nlearning why these traditions are\ndesigned to practice.\n\nHence emotional\nintelligence is a thin line in\nmaking a smart plus sensitive,\nhigh valued officer, human being.\nwithout emotional intelligence\none cannot survive and tackle\nthe challenges.",
+              "student_answer_summary": "The student attempts to link EI with value formation and ethical decision-making, citing conflict resolution and communication, but uses informal examples and lacks theoretical depth.",
+              "is_attempted": true,
+              "section_name": "Main Section",
+              "answer_type": "paragraph",
+              "max_marks": 0,
+              "marks_awarded": 0,
+              "status": "evaluated",
+              "feedback": "Your answer touches upon basic points but lacks the analytical depth expected in UPSC mains. Avoid colloquialisms and focus on core EI components like self-awareness, empathy, and self-regulation in ethical decision-making.",
+              "answer_span": [
+                  {
+                      "page": 2,
+                      "rows": [
+                          "L31:AS31",
+                          "L32:AS32",
+                          "L33:AU33",
+                          "M34:AU34",
+                          "M35:AU35",
+                          "M36:AT36",
+                          "L37:AP37",
+                          "R38:AU38",
+                          "L39:AU39",
+                          "L40:AU40",
+                          "L41:AU41",
+                          "L42:AU42",
+                          "L43:AR43",
+                          "L44:AU44",
+                          "L45:AU45",
+                          "U46:AP46",
+                          "M47:AN47",
+                          "M48:AU48",
+                          "M49:AR49",
+                          "L52:AU52",
+                          "L53:AU53",
+                          "L54:AT54",
+                          "L55:AU55",
+                          "M56:AU56",
+                          "M59:AU59",
+                          "M60:AU60",
+                          "N61:AU61",
+                          "N62:AU62",
+                          "N63:AU63",
+                          "P64:AU64",
+                          "P65:AU65",
+                          "N66:AU66",
+                          "N67:AU67",
+                          "O68:AU68",
+                          "T69:AU69",
+                          "L71:AU71",
+                          "O72:AU72",
+                          "O73:AU73",
+                          "L74:AU74",
+                          "L75:AU75",
+                          "L76:AU76",
+                          "L77:AU77",
+                          "L78:AU78"
+                      ]
+                  },
+                  {
+                      "page": 3,
+                      "rows": [
+                          "L13:AX13",
+                          "L14:AX14",
+                          "L15:AX15",
+                          "L16:AX16",
+                          "L17:AX17",
+                          "P18:AX18",
+                          "R19:AX19",
+                          "Q20:AX20",
+                          "Q21:AX21",
+                          "P23:AX23",
+                          "Q24:AX24",
+                          "L25:AX25",
+                          "L26:AX26",
+                          "L27:AX27",
+                          "Q28:AX28",
+                          "L30:AX30",
+                          "U31:AX31",
+                          "M32:AX32",
+                          "M33:AX33",
+                          "N34:AX34",
+                          "V35:AX35",
+                          "L37:AX37",
+                          "L38:AX38",
+                          "N39:AX39",
+                          "N40:AX40",
+                          "L41:AX41",
+                          "L42:AX42",
+                          "L43:AX43",
+                          "L44:AX44",
+                          "L45:AX45",
+                          "L46:AX46",
+                          "M47:AX47",
+                          "M48:AX48",
+                          "N49:AX49",
+                          "M50:AX50",
+                          "N51:AX51",
+                          "M52:AX52",
+                          "L53:AX53",
+                          "L54:AX54",
+                          "L55:AX55",
+                          "M56:AX56",
+                          "L59:AX59",
+                          "L60:AX60",
+                          "L61:AX61",
+                          "L62:AX62",
+                          "L63:AX63",
+                          "L64:AX64",
+                          "L65:AX65",
+                          "L66:AX66",
+                          "L67:AX67",
+                          "L68:AX68",
+                          "L69:AX69",
+                          "L70:AX70",
+                          "L71:AX71",
+                          "L72:AX72",
+                          "L73:AX73",
+                          "L74:AX74",
+                          "L75:AX75",
+                          "L76:AX76",
+                          "L77:AX77",
+                          "L78:AX78"
+                      ]
+                  }
+              ],
+              "marking": {
+                  "page": 2,
+                  "score_range": "L31"
+              },
+              "annotations": [
+                  {
+                      "page": 2,
+                      "is_positive": false,
+                      "comment": "Avoid rigid dichotomies. Emotions play a key role in internalizing moral values and translating them into action.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "P33:AS33"
+                          ]
+                      },
+                      "comment_rows": [
+                          "E33:I33",
+                          "E34:I34",
+                          "E35:I35"
+                      ]
+                  },
+                  {
+                      "page": 3,
+                      "is_positive": false,
+                      "comment": "Specify how this aids ethical decision-making, such as fostering empathy and stakeholder-oriented choices.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "L18:AX18"
+                          ]
+                      },
+                      "comment_rows": [
+                          "A18:J18",
+                          "A19:J19",
+                          "A20:J20",
+                          "A21:J21"
+                      ]
+                  },
+                  {
+                      "page": 2,
+                      "is_positive": true,
+                      "comment": "Good point. This reflects self-regulation, a core component of EI that prevents impulsive unethical actions.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "P67:AU67"
+                          ]
+                      },
+                      "comment_rows": [
+                          "AW53:BG53"
+                      ]
+                  },
+                  {
+                      "page": 3,
+                      "is_positive": false,
+                      "comment": "Avoid colloquial examples in UPSC mains. Use formal terminology like 'superficial social validation' or 'performative morality'.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "M48:AX48"
+                          ]
+                      },
+                      "comment_rows": [
+                          "AY48:BA48",
+                          "AY49:BA49",
+                          "AY50:BA50"
+                      ]
+                  },
+                  {
+                      "page": 2,
+                      "is_positive": false,
+                      "comment": "Elaborate on how EI ensures decisions are grounded in moral principles rather than short-term gains.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "P78:AU78"
+                          ]
+                      },
+                      "comment_rows": [
+                          "A82:AM82",
+                          "A83:AM83",
+                          "A84:AM84"
+                      ]
+                  },
+                  {
+                      "page": 3,
+                      "is_positive": false,
+                      "comment": "Avoid extreme statements. Conclude by emphasizing EI as the bridge between moral reasoning and ethical action.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "L72:AX72"
+                          ]
+                      },
+                      "comment_rows": [
+                          "A82:AM82",
+                          "A83:AM83",
+                          "A84:AM84"
+                      ]
+                  }
+              ]
+          },
+          {
+              "question_id": 2,
+              "question": "Q2 How can Swami Vivekanandas\nidea of \"service to humanity is\nservice to God\" be linked to the\nsense of responsibility in public\nservants? Explain with examples\n(8 Marks)",
+              "student_answer": "Ans: Swami Vivekanand believed\nthat \"service to humanity is\nservice to God\" which means as\na bureaucrat one should consider\ngiving service to people as\npure as giving service to God\nwe take this responsibility like\nwe serve our God.\n\nSense of responsibility in\npublic servants can be understood\nwith following points.\n\n1. Taking Duty as a sacred\nJob: Public servants don't see\ntheir duty like just a job",
+              "student_answer_summary": "The student begins to explain Vivekananda's quote by equating public service to serving God and introduces the point of viewing duty as a sacred job, but leaves the answer incomplete without examples.",
+              "is_attempted": true,
+              "section_name": "Main Section",
+              "answer_type": "paragraph",
+              "max_marks": 0,
+              "marks_awarded": 0,
+              "status": "evaluated",
+              "feedback": "The answer starts with a decent interpretation of Vivekananda's philosophy but is left incomplete. To score well, you must elaborate on how this builds empathy and selflessness, and crucially, provide the requested examples.",
+              "answer_span": [
+                  {
+                      "page": 4,
+                      "rows": [
+                          "N30:AT30",
+                          "N31:AT31",
+                          "N32:AT32",
+                          "O33:AU33",
+                          "O34:AV34",
+                          "N35:AT35",
+                          "N36:AV36",
+                          "U37:AV37",
+                          "N38:AV38",
+                          "N39:AT39",
+                          "P40:AT40",
+                          "N41:AT41",
+                          "N42:AU42",
+                          "O43:AS43",
+                          "N44:AV44",
+                          "N45:AV45",
+                          "N46:AR46",
+                          "N47:AR47",
+                          "N48:AU48",
+                          "O49:AV49",
+                          "N50:AV50",
+                          "N51:AV51",
+                          "Q52:AV52",
+                          "AE53:AV53",
+                          "N54:AR54",
+                          "N55:AT55",
+                          "N56:AV56",
+                          "N57:AV57",
+                          "N58:AV58",
+                          "N59:AV59",
+                          "N60:AV60",
+                          "N61:AV61",
+                          "N62:AV62",
+                          "N63:AV63",
+                          "Z64:AV64",
+                          "N65:AV65",
+                          "N66:AV66",
+                          "N67:AV67",
+                          "P68:AV68",
+                          "P69:AV69",
+                          "Q70:AV70",
+                          "Q71:AV71",
+                          "P72:AV72",
+                          "N73:AV73",
+                          "N74:AV74"
+                      ]
+                  }
+              ],
+              "marking": {
+                  "page": 4,
+                  "score_range": "N30"
+              },
+              "annotations": [
+                  {
+                      "page": 4,
+                      "is_positive": false,
+                      "comment": "The answer ends abruptly here. You must complete the explanation and provide practical examples (e.g., pandemic duties, disaster relief) as explicitly asked.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "arrow",
+                          "rows": [
+                              "Q71:AV71"
+                          ]
+                      },
+                      "comment_rows": [
+                          "A82:AM82",
+                          "A83:AM83",
+                          "A84:AM84"
+                      ]
+                  },
+                  {
+                      "page": 4,
+                      "is_positive": true,
+                      "comment": "Good connection. This mindset fosters intrinsic motivation and selflessness in public servants.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "O44:AS44"
+                          ]
+                      },
+                      "comment_rows": [
+                          "AY44:BG44",
+                          "AY45:BG45",
+                          "AY46:BG46",
+                          "AY47:BG47"
+                      ]
+                  },
+                  {
+                      "page": 4,
+                      "is_positive": true,
+                      "comment": "Valid point. Treating duty as sacred acts as a strong deterrent against apathy and corruption.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "underline",
+                          "rows": [
+                              "Z65:AV65"
+                          ]
+                      },
+                      "comment_rows": [
+                          "G65:K65"
+                      ]
+                  },
+                  {
+                      "page": 4,
+                      "is_positive": true,
+                      "comment": "A decent start, but try to briefly mention the underlying philosophy like 'Jiva is Shiva' or 'Daridra Narayana' for better impact.",
+                      "comment_font_pts": 14.0,
+                      "anchor": {
+                          "type": "curly_brace",
+                          "rows": [
+                              "N30:AT30",
+                              "N32:AT32",
+                              "N35:AT35",
+                              "N38:AV38",
+                              "N41:AT41",
+                              "O43:AS43",
+                              "N46:AR46",
+                              "O49:AV49"
+                          ]
+                      },
+                      "comment_rows": [
+                          "G39:K39"
+                      ]
+                  }
+              ]
+          }
+      ],
+      "skippedPages": [
+          1
+      ],
+      "cellGridMeta": [
+          {
+              "page": 1,
+              "rows": 84,
+              "cols": 59,
+              "cell_size_pts": 10.0,
+              "left_margin_pts": 2.5,
+              "top_margin_pts": 1.0,
+              "page_w_pts": 595.0,
+              "page_h_pts": 842.0,
+              "grid_version": "v4"
+          },
+          {
+              "page": 2,
+              "rows": 84,
+              "cols": 59,
+              "cell_size_pts": 10.0,
+              "left_margin_pts": 2.5,
+              "top_margin_pts": 1.0,
+              "page_w_pts": 595.0,
+              "page_h_pts": 842.0,
+              "grid_version": "v4"
+          },
+          {
+              "page": 3,
+              "rows": 84,
+              "cols": 59,
+              "cell_size_pts": 10.0,
+              "left_margin_pts": 2.5,
+              "top_margin_pts": 1.0,
+              "page_w_pts": 595.0,
+              "page_h_pts": 842.0,
+              "grid_version": "v4"
+          },
+          {
+              "page": 4,
+              "rows": 84,
+              "cols": 59,
+              "cell_size_pts": 10.0,
+              "left_margin_pts": 2.5,
+              "top_margin_pts": 1.0,
+              "page_w_pts": 595.0,
+              "page_h_pts": 842.0,
+              "grid_version": "v4"
+          }
+      ],
+      "checkLevel": "Moderate",
+      "modelId": "dbf91c03-181d-41cd-a27f-d69c0ef95517"
+  }
+}

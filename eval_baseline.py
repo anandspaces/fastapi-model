@@ -36,7 +36,7 @@ INVARIANT_DESCRIPTIONS = {
     "I2": "comment_range on non-writable cells",
     "I3": "anchor.range out of grid",
     "I4": "score_range outside score_box_range",
-    "I5": "comment_font_pts out of [11, 15]",
+    "I5": "comment_font_pts out of [14, 16]",
     "I6": "comment overflows comment_range at chosen font",
     "I7": "two annotations overlap on same page",
     "I8": "exponent_caret missing extra.missing_word",

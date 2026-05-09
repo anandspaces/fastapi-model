@@ -81,7 +81,7 @@ def _clean_response(grid: FakeGrid) -> dict[str, Any]:
                             "page": grid.page,
                             "is_positive": False,
                             "comment": "Short remark.",
-                            "comment_font_pts": 12.0,
+                            "comment_font_pts": 14.0,
                             "comment_range": "G3:K4",
                             "anchor": {
                                 "type": "underline",
@@ -225,7 +225,7 @@ def test_i7_overlapping_comment_ranges():
         "page": grid.page,
         "is_positive": False,
         "comment": "Another remark.",
-        "comment_font_pts": 12.0,
+        "comment_font_pts": 14.0,
         "comment_range": "I3:M4",          # overlaps G3:K4
         "anchor": {"type": "none"},
     })

@@ -9,7 +9,7 @@ Invariants (mirror the design doc):
     I2  comment_range cells are all writable
     I3  anchor.range cells are within grid (writability not required)
     I4  marking.score_range ⊆ marking.score_box_range
-    I5  comment_font_pts ∈ [11.0, 15.0]
+    I5  comment_font_pts ∈ [14.0, 16.0]
     I6  comment text fits comment_range at comment_font_pts (with 5% margin)
     I7  no two annotations on the same page have overlapping comment_range
     I8  exponent_caret anchors have non-empty ``extra.missing_word``
@@ -34,9 +34,9 @@ import fitz
 
 from cell_grid_service_v4 import PageCellGrid, rc_from_cell_id
 
-FONT_PTS_MIN: float = 11.0
-FONT_PTS_MAX: float = 15.0
-DEFAULT_FONT_PTS: float = 12.0
+FONT_PTS_MIN: float = 14.0
+FONT_PTS_MAX: float = 16.0
+DEFAULT_FONT_PTS: float = 14.0
 COMMENT_FIT_MARGIN: float = 0.05  # 5% breathing room inside cell rectangle
 LINE_HEIGHT_MULT: float = 1.4
 

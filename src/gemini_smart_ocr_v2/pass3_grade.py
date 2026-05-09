@@ -19,6 +19,8 @@ from src.gemini_evaluate_student_answers import (
 from src.gemini_evaluate_student_answers import _repair_truncated_json, _strip_json_fence
 from src.gemini_extract import MODEL_ID
 
+from src.annotation_planner import assign_comment_rows_for_evaluation
+
 from .free_cells import compute_free_cells, pass3_spatial_payload
 from .validator import snap_anchor_rows_to_grid, validate_annotations_for_item
 
@@ -87,11 +89,18 @@ MARKING RULES:
 - feedback: 25–40 words, examiner tone.
 
 ANNOTATION RULES:
-- Each annotation: page (1-based), comment, is_positive, comment_font_pts [11–15],
-  comment_rows (ONLY cells from FREE sets — list of single-row ranges),
+- Each annotation: page (1-based), comment, is_positive, comment_font_pts in [14–16] (default 14),
+  preferred_side ("left" | "right" | "gap"), priority (1=high, 2=medium, 3=low),
   anchor: {{ "type": ..., "rows": [...] }}.
-- No two annotations on the same page may share any comment_rows cell.
+- Do NOT emit comment_rows — Python places comments into FREE cells using your preferred_side + anchor proximity.
 - answer_span and marking are FIXED — do NOT emit them (Python merges resolved spans).
+
+COMMENT PLACEMENT HINTS (semantic only — backend computes exact cells):
+- preferred_side "right": margin notes in cols AV–BG (typical for UPSC body text).
+- preferred_side "left": notes in cols A–K.
+- preferred_side "gap": horizontal blank band between paragraphs (Python prefers wide gap rows).
+- priority: use 1 for the most important feedback on a page, 2 default, 3 for minor notes — resolves overlapping placement order.
+- Spread preferred_side across annotations on the same page (mix left/right/gap) when possible.
 
 ANNOTATION COUNT (per-page floor):
 - For EACH page that contains this student's handwriting, emit 3-4 annotations on that page.
@@ -105,11 +114,16 @@ ANCHOR PLACEMENT (use the overlay JPEG to choose cells precisely):
   Example: a single word "anger" sitting in cells M59-R59 -> "rows": ["M59:R59"].
   Wrong: "rows": ["M59:AT59"] (covers the entire row, not just the word).
 - "underline"
-  Rows MUST sit in the cell row DIRECTLY BENEATH the underlined writing — the underline lives in the row below the word(s), not on the same row.
-  If the writing is on row 31, anchor.rows should reference row 32 (e.g., "L32:AS32"), with column span tight to the underlined phrase only.
-  Pick the row-below cells even if they are FREE (empty) — the underline is meant to occupy that empty band beneath the text.
+  Underlines live in FREE rows directly UNDER the ink cells (never on the same row as the words).
+  If the praised/criticised phrase fits on ONE OCCUPIED row R, anchor.rows contains ONE range on row R+1 with tight column span to that phrase's ink below.
+  If handwriting is SLANTED or wraps across OCCUPIED rows R, R+1, … R+k as one phrase, anchor.rows MUST list ONE range string per OCCUPIED row, each describing the underline band immediately below THAT row — e.g. ["L{{R+1}}:AU{{R+1}}", "L{{R+2}}:AU{{R+2}}", ...] hugging ink under each respective line (no single spanning rectangle through the body's mid-air).
+  Use empty cells beneath the handwriting even when FREE — that is intentional for underline placement.
 - "tick"
   Rows are 1-3 cells either at the very end of the praised writing row or in the adjacent margin column on that row.
+- "arrow"
+  Margin arrow pointing at specific ink — rows cover the target phrase band (single-row range tight to ink).
+- "curly_brace"
+  Rows span multiple lines of ink (paragraph bracket); list one range per row from line_start to line_end columns.
 - "none"
   Omit "rows" (or pass an empty array). Use sparingly — prefer a real anchor when feedback refers to a specific phrase.
 
@@ -130,7 +144,7 @@ OUTPUT: a single JSON object with keys:
 question_id, question, max_marks, marks_awarded, status, student_answer_summary,
 feedback, annotations
 
-Use the same annotation shape as the cell-overlay evaluator (comment_rows + anchor.rows).
+Each annotation must include anchor.rows (except type "none") and preferred_side + priority — NOT comment_rows.
 Do NOT include answer_span or marking."""
 
 def _parse_one_question_eval(raw: str) -> dict[str, Any]:
@@ -260,6 +274,7 @@ def grade_items_pass3_v2(
                 if g0 is not None and ad.get("anchor"):
                     ad["anchor"] = snap_anchor_rows_to_grid(g0, ad["anchor"])
                 normed.append(ad)
+            assign_comment_rows_for_evaluation(normed, grids_by_page, initial_free_full)
             init_free = {p: set(s) for p, s in initial_free_full.items()}
             ev["annotations"] = validate_annotations_for_item(
                 grids_by_page, normed, init_free

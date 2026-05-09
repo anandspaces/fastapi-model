@@ -27,6 +27,8 @@ from typing import Any
 
 from cell_grid_service_v4 import PageCellGrid, cell_id_from_rc
 
+from src.annotation_planner import replan_comment_rows
+
 from .snap import cells_from_range_strings, parse_single_cell, parse_single_row_range
 
 log = logging.getLogger(__name__)
@@ -106,6 +108,8 @@ def validate_and_reserve_annotation_cells(
     ann: dict[str, Any],
     free_rc: set[tuple[int, int]],
     consumed_page: set[tuple[int, int]],
+    *,
+    _replay: bool = False,
 ) -> dict[str, Any] | None:
     """Repair ``comment_rows`` per token (prefix); reserve accepted cells on this page."""
     rows_raw = ann.get("comment_rows")
@@ -137,6 +141,15 @@ def validate_and_reserve_annotation_cells(
             a = cell_id_from_rc(row, cols[0])
             b = cell_id_from_rc(row, cols[-1])
             kept_row_strings.append(a if a == b else f"{a}:{b}")
+
+    if not accepted and not _replay:
+        fresh = replan_comment_rows(grid, ann, free_rc, consumed_page)
+        if fresh:
+            ann2 = dict(ann)
+            ann2["comment_rows"] = fresh
+            return validate_and_reserve_annotation_cells(
+                grid, ann2, free_rc, consumed_page, _replay=True
+            )
 
     if not accepted:
         return None

@@ -183,6 +183,26 @@ class PageCellGrid:
             d["cells"] = [c.to_dict() for c in self.cells]
         return d
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "PageCellGrid":
+        """Rebuild from :meth:`to_dict` output (``include_cells`` optional)."""
+        cells = [Cell(**c) for c in d.get("cells", [])]
+        runs = [WritableRun(**r) for r in d.get("runs", [])]
+        regions = [WritableRegion(**r) for r in d.get("regions", [])]
+        return cls(
+            page=int(d["page"]),
+            rows=int(d["rows"]),
+            cols=int(d["cols"]),
+            cell_size_pts=float(d["cell_size_pts"]),
+            left_margin_pts=float(d["left_margin_pts"]),
+            top_margin_pts=float(d["top_margin_pts"]),
+            page_w_pts=float(d["page_w_pts"]),
+            page_h_pts=float(d["page_h_pts"]),
+            cells=cells,
+            runs=runs,
+            regions=regions,
+        )
+
 
 # ── Core analysis ───────────────────────────────────────────────────────────
 

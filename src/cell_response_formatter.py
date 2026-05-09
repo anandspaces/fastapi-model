@@ -16,11 +16,11 @@ and emits the cell-ID-native item shape:
         "page": N,
         "is_positive": bool,
         "comment": "...",
-        "comment_font_pts": float,                 // [11.0, 15.0]
-        "comment_range": "A1:B2",
+        "comment_font_pts": float,                 // [14.0, 16.0]
+        "comment_rows": ["A5:K5", "A6:K6", ...],
         "anchor": {
           "type": "ellipse"|"tick"|"underline"|"curly_brace"|"exponent_caret"|"none",
-          "range": "A1:B2",                        // optional when type="none"
+          "rows": ["..."],                         // preferred; optional anchor.range legacy
           "extra": { ... }                         // type-specific
         }
     }]
@@ -38,10 +38,10 @@ from cell_grid_service_v4 import PageCellGrid, cell_id_from_rc, rc_from_cell_id
 
 from src.gemini_smart_ocr_v2.snap import cells_from_range_strings
 
-# Comment font is rendered in the [11, 15] pt range when annotations are
+# Comment font is rendered in the [14, 16] pt range when annotations are
 # painted onto the answer sheet. Default applies when the placer does not
 # choose explicitly.
-DEFAULT_COMMENT_FONT_PTS: float = 12.0
+DEFAULT_COMMENT_FONT_PTS: float = 14.0
 
 # Item-level fields preserved verbatim. No spatial fields here — those are
 # rebuilt as ``answer_span`` and ``marking`` below.
@@ -82,20 +82,39 @@ def _cell_at_y(grid: PageCellGrid, y_pct: float, *, side: str) -> str | None:
     return cell_id_from_rc(row, col)
 
 
-def _range_from_cells(cell_ids: list[str]) -> str | None:
-    if not cell_ids:
-        return None
-    try:
-        rcs = [rc_from_cell_id(c) for c in cell_ids]
-    except ValueError:
-        return None
+def _comment_rows_from_bbox(r_lo: int, c_lo: int, r_hi: int, c_hi: int) -> list[str]:
+    """One Excel-style token per horizontal row spanning [c_lo, c_hi]."""
+    out: list[str] = []
+    for row in range(r_lo, r_hi + 1):
+        a = cell_id_from_rc(row, c_lo)
+        b = cell_id_from_rc(row, c_hi)
+        out.append(a if a == b else f"{a}:{b}")
+    return out
+
+
+def _bounds_from_range_id_str(range_id: str) -> tuple[int, int, int, int]:
+    rid = range_id.strip()
+    if ":" in rid:
+        a, b = rid.split(":", 1)
+    else:
+        a = b = rid
+    r1, c1 = rc_from_cell_id(a.strip())
+    r2, c2 = rc_from_cell_id(b.strip())
+    return min(r1, r2), min(c1, c2), max(r1, r2), max(c1, c2)
+
+
+def _bounds_from_cell_id_list(ids: list[str]) -> tuple[int, int, int, int] | None:
+    rcs: list[tuple[int, int]] = []
+    for x in ids:
+        try:
+            rcs.append(rc_from_cell_id(str(x).strip()))
+        except ValueError:
+            return None
     if not rcs:
         return None
     rs = [r for r, _ in rcs]
     cs = [c for _, c in rcs]
-    a = cell_id_from_rc(min(rs), min(cs))
-    b = cell_id_from_rc(max(rs), max(cs))
-    return a if a == b else f"{a}:{b}"
+    return min(rs), min(cs), max(rs), max(cs)
 
 
 # ── Per-section builders ────────────────────────────────────────────────────
@@ -243,7 +262,7 @@ def _build_marking(
 
 
 _VALID_ANCHOR_TYPES = (
-    "ellipse", "tick", "underline", "curly_brace", "exponent_caret", "none",
+    "ellipse", "tick", "underline", "arrow", "curly_brace", "exponent_caret", "none",
 )
 
 
@@ -277,9 +296,9 @@ def _build_annotation(
     """Per-annotation wire shape. Two source shapes accepted:
 
     1. Gemini cell-overlay path: ``page`` (1-indexed), ``comment_rows[]``
-       and ``anchor`` are emitted directly. Passed through.
+       and ``anchor`` emitted directly — passed through (no ``comment_range``).
     2. Legacy placer path: ``page_index`` (0-indexed), ``range_id`` /
-       ``cell_ids[]`` from ``assign_cell_ids_v4``. Translated.
+       ``cell_ids[]`` converted to ``comment_rows``.
     """
     # Page — prefer Gemini's 1-indexed `page`, fall back to 0-indexed `page_index`.
     if "page" in ann:
@@ -301,36 +320,38 @@ def _build_annotation(
         "anchor": _normalise_anchor(ann.get("anchor")),
     }
 
-    # comment_rows — Gemini's row-wise list. Pass through; backfill the
-    # bounding rect into comment_range for any client still on the old shape.
-    comment_rows = ann.get("comment_rows")
-    if isinstance(comment_rows, list) and comment_rows:
-        rows = [str(r) for r in comment_rows]
+    # comment_rows — Gemini overlay path row-wise list; wire format exposes only comment_rows.
+    comment_rows_raw = ann.get("comment_rows")
+    if isinstance(comment_rows_raw, list) and comment_rows_raw:
+        rows = [str(r) for r in comment_rows_raw]
         if grids_by_page:
             g = grids_by_page.get(page)
             if g is not None:
                 rows = _sanitize_row_tokens(rows, g)
-        out["comment_rows"] = rows
-        all_cells: list[str] = []
-        for r in rows:
-            if ":" in r:
-                a, b = r.split(":", 1)
-                all_cells.extend([a.strip(), b.strip()])
-            else:
-                all_cells.append(r.strip())
-        derived = _range_from_cells(all_cells)
-        if derived:
-            out["comment_range"] = derived
+        if rows:
+            out["comment_rows"] = rows
         return out
 
-    # Legacy placer path — single rectangular comment_range.
-    rid = ann.get("range_id")
-    if rid:
-        out["comment_range"] = str(rid)
-    else:
-        derived = _range_from_cells(ann.get("cell_ids") or [])
-        if derived:
-            out["comment_range"] = derived
+    # Legacy placer path — derive comment_rows from rectangular range_id or cell_ids.
+    if grids_by_page:
+        g = grids_by_page.get(page)
+        bounds: tuple[int, int, int, int] | None = None
+        rid_raw = ann.get("range_id")
+        if isinstance(rid_raw, str) and rid_raw.strip():
+            try:
+                bounds = _bounds_from_range_id_str(rid_raw)
+            except ValueError:
+                bounds = None
+        if bounds is None:
+            cid_list = ann.get("cell_ids")
+            if isinstance(cid_list, list) and cid_list:
+                bounds = _bounds_from_cell_id_list([str(x) for x in cid_list])
+        if g is not None and bounds is not None:
+            rl, cl, rh, ch = bounds
+            rows = _comment_rows_from_bbox(rl, cl, rh, ch)
+            rows = _sanitize_row_tokens(rows, g)
+            if rows:
+                out["comment_rows"] = rows
     return out
 
 
