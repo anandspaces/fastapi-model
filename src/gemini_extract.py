@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-MODEL_ID = "gemini-3.1-pro-preview"
+MODEL_ID = os.environ.get("GEMINI_MODEL")
 FILE_ACTIVE_TIMEOUT = 180
 
 log = logging.getLogger(__name__)

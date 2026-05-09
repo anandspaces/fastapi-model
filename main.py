@@ -10,6 +10,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Load .env FIRST so all os.environ.get() calls at module-import time in src/
+# packages (e.g. MODEL_ID in gemini_extract.py) receive the correct values.
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -31,7 +37,7 @@ from src.gemini_copy_ocr import (
     ocr_essay_copy_pdf,
     ocr_essay_copy_pdf_rasterized,
 )
-from src.gemini_smart_ocr import smart_ocr_extract_student_answers
+from src.gemini_smart_ocr import enrich_remarks_from_annotations, smart_ocr_extract_student_answers
 from src.gemini_evaluate_student_answers import (
     evaluate_student_answers_against_model,
     format_answer_model_as_teacher_instructions,
@@ -68,7 +74,6 @@ from src.service import (
     update_key_upload,
     upsert_answer_model_from_booklet,
 )
-from dotenv import load_dotenv
 from src.schemas import (
     AuthRequest,
     CachedOcrRequest,
@@ -92,8 +97,6 @@ class SnapAnnotationsRequest(BaseModel):
     items: list[dict]
     pages: list[dict]
 
-
-load_dotenv()
 
 log = logging.getLogger(__name__)
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -1372,6 +1375,20 @@ async def post_analyse_smart_ocr(
 ) -> JSONResponse:
     """Extracts question-wise answers and marking coordinates from a PDF.
 
+    Each page is rasterized, overlaid with a 50×50 reference grid, and sent to
+    Gemini in a single unified call that simultaneously classifies the page type,
+    performs OCR, and identifies visual annotation spots.  Each item in the
+    response therefore includes two extra fields:
+
+    - ``anchor_marks``: list of typed teacher markup spots (circle / ellipse /
+      underline / tick) with ``page``, ``cx_pct``, ``cy_pct``, ``rx_pct``,
+      ``ry_pct`` in percentage coordinates.
+    - ``remarks``: list of free-whitespace bounding boxes (``page``, ``x1_pct``,
+      ``y1_pct``, ``x2_pct``, ``y2_pct``) suitable for written teacher comments.
+
+    All coordinates are page percentages 0–100 derived from the 50-point grid
+    (grid point 1 → 0 %, grid point 50 → 98 %, natural ~2 % margin at right/bottom).
+
     If modelId is provided, also runs Stage 3 grading against the stored answer
     model and merges marks, status, feedback, and annotations into each object
     in ``items`` (same ``question_id``). Intro/cover pages are segregated in the
@@ -1509,6 +1526,7 @@ async def post_analyse_smart_ocr(
                 check_level=check_canon,
             )
             items = merge_evaluations_into_items(items, ev_list)
+            enrich_remarks_from_annotations(items)
             log.info(
                 "analyse/smart-ocr eval ok request_id=%s model_id=%s merged_items=%s",
                 rid,

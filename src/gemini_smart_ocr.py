@@ -23,6 +23,7 @@ from src.gemini_copy_ocr import (
     rasterize_pdf_to_png_pages,
 )
 from src.gemini_extract import MODEL_ID
+from src.grid_overlay import batch_draw_grid, grid_to_pct
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,184 @@ _CLASSIFY_SCHEMA = types.Schema(
 _PAGE_TYPES = frozenset(
     {"DUPLICATE", "CORRECTION", "PARAGRAPH", "WORD_LIST", "UNKNOWN"}
 )
+
+# --- Unified page schema (classify + OCR + annotations in one call) --------------------
+
+_ANCHOR_MARK_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "type": types.Schema(
+            type=types.Type.STRING,
+            description="One of: circle, ellipse, underline, tick",
+        ),
+        "cx": types.Schema(type=types.Type.NUMBER, description="Grid x center (1-50)"),
+        "cy": types.Schema(type=types.Type.NUMBER, description="Grid y center (1-50)"),
+        "rx": types.Schema(
+            type=types.Type.NUMBER,
+            description="x-radius in grid units; for underline = half horizontal span; for tick = 0",
+        ),
+        "ry": types.Schema(
+            type=types.Type.NUMBER,
+            description="y-radius; for underline = 0; for tick = 0",
+        ),
+    },
+    required=["type", "cx", "cy", "rx", "ry"],
+    property_ordering=["type", "cx", "cy", "rx", "ry"],
+)
+
+_REMARK_BOX_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "x1": types.Schema(type=types.Type.NUMBER, description="Top-left grid x (1-50)"),
+        "y1": types.Schema(type=types.Type.NUMBER, description="Top-left grid y (1-50)"),
+        "x2": types.Schema(type=types.Type.NUMBER, description="Bottom-right grid x (1-50)"),
+        "y2": types.Schema(type=types.Type.NUMBER, description="Bottom-right grid y (1-50)"),
+        "comment": types.Schema(type=types.Type.STRING, description="Teacher comment text; empty string if none"),
+    },
+    required=["x1", "y1", "x2", "y2", "comment"],
+    property_ordering=["x1", "y1", "x2", "y2", "comment"],
+)
+
+_ANNOTATION_ONLY_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "anchor_marks": types.Schema(
+            type=types.Type.ARRAY,
+            items=_ANCHOR_MARK_SCHEMA,
+            description="3-5 teacher markup spots (circle/ellipse/underline/tick) identified visually.",
+        ),
+        "remarks": types.Schema(
+            type=types.Type.ARRAY,
+            items=_REMARK_BOX_SCHEMA,
+            description="1-3 free-whitespace bounding boxes suitable for written teacher comments.",
+        ),
+    },
+    required=["anchor_marks", "remarks"],
+    property_ordering=["anchor_marks", "remarks"],
+)
+
+
+def _build_annotation_detect_prompt(page_num: int, total_pages: int) -> str:
+    return f"""You see page {page_num} of {total_pages} from a handwritten exam answer book.
+A 50×50 reference grid is drawn on the image.
+  Columns 1–50: left edge → right (~2 % natural margin at far right).
+  Rows    1–50: top edge  → bottom (~2 % natural margin at bottom).
+
+Return JSON with exactly TWO fields:
+
+1. anchor_marks — 3–5 teacher markup spots visible on this page:
+   • "circle"    : small circle around a key term/number. rx ≈ 1–2 grid units.
+   • "ellipse"   : oval over a phrase. rx = half span, ry ≈ 1–2.
+   • "underline" : straight line under text. cx/cy = line centre, rx = half span, ry = 0.
+   • "tick"      : check-mark beside a correct item. rx = 0, ry = 0.
+   Use the grid numbers visible in the image to pinpoint each spot precisely.
+
+2. remarks — 1–3 FREE WHITESPACE bounding boxes for teacher written comments.
+   STRICT RULES:
+   • x2 MUST be strictly greater than x1 (NEVER x1 == x2).
+   • y2 MUST be strictly greater than y1 (NEVER y1 == y2).
+   • Width (x2 - x1) ≥ 5 grid units; height (y2 - y1) ≥ 3 grid units.
+   • Place ONLY in genuinely blank areas (no handwriting inside).
+   • Right-margin example: {{"x1":38,"y1":20,"x2":49,"y2":35,"comment":""}}
+   • Gap example:          {{"x1":5,"y1":62,"x2":48,"y2":72,"comment":""}}
+   • Set comment to "" always.
+
+All coordinates must be integers in [1, 50]. Never output x1 == x2 or y1 == y2."""
+
+
+def _detect_page_annotations(
+    api_key: str,
+    grid_png: bytes,
+    page_num: int,
+    total_pages: int,
+) -> dict[str, Any]:
+    """Annotation-only call: detect anchor_marks and remark boxes from a grid-annotated image.
+
+    Runs in parallel with the OCR call. Returns {anchor_marks, remarks} with grid coordinates.
+    """
+    client = genai.Client(api_key=api_key)
+    prompt = _build_annotation_detect_prompt(page_num, total_pages)
+    parts = [
+        types.Part.from_text(text=prompt),
+        types.Part.from_bytes(data=grid_png, mime_type="image/png"),
+    ]
+    cfg = types.GenerateContentConfig(
+        temperature=0.0,
+        max_output_tokens=4096,
+        response_mime_type="application/json",
+        response_schema=_ANNOTATION_ONLY_SCHEMA,
+    )
+    last_raw = ""
+    for attempt in range(1, 3):
+        resp = client.models.generate_content(model=MODEL_ID, contents=parts, config=cfg)
+        last_raw = (getattr(resp, "text", None) or "").strip()
+        if not last_raw:
+            if attempt < 2:
+                time.sleep(0.5)
+            continue
+        # Parse with _parse_annotation_response
+        result = _parse_annotation_response(last_raw, page_num)
+        if result["anchor_marks"] or result["remarks"]:
+            return result
+        if attempt < 2:
+            time.sleep(0.5)
+
+    log.warning("detect_page_annotations: empty page=%s raw=%r", page_num, last_raw[:200])
+    return {"anchor_marks": [], "remarks": []}
+
+
+def _parse_annotation_response(raw: str, page_num: int) -> dict[str, Any]:
+    """Parse annotation-only JSON → {anchor_marks, remarks}."""
+    for candidate in (_strip_json_fence(raw), _repair_json(raw)):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        raw_anchors = data.get("anchor_marks") or []
+        raw_remarks = data.get("remarks") or []
+
+        anchor_marks: list[dict[str, Any]] = []
+        for a in raw_anchors if isinstance(raw_anchors, list) else []:
+            if not isinstance(a, dict):
+                continue
+            t = str(a.get("type", "")).strip().lower()
+            if t not in ("circle", "ellipse", "underline", "tick"):
+                continue
+            try:
+                anchor_marks.append({
+                    "type": t,
+                    "cx": float(a.get("cx", 25)),
+                    "cy": float(a.get("cy", 25)),
+                    "rx": float(a.get("rx", 2)),
+                    "ry": float(a.get("ry", 2)),
+                })
+            except (TypeError, ValueError):
+                pass
+
+        remarks: list[dict[str, Any]] = []
+        for r in raw_remarks if isinstance(raw_remarks, list) else []:
+            if not isinstance(r, dict):
+                continue
+            try:
+                _gs = 50.0
+                x1 = max(1.0, min(_gs, float(r.get("x1", 5))))
+                y1 = max(1.0, min(_gs, float(r.get("y1", 80))))
+                x2 = max(1.0, min(_gs, float(r.get("x2", 45))))
+                y2 = max(1.0, min(_gs, float(r.get("y2", 90))))
+                if x2 - x1 < 6:
+                    x2 = min(_gs, x1 + 6)
+                if y2 - y1 < 3:
+                    y2 = min(_gs, y1 + 3)
+                remarks.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "comment": str(r.get("comment", ""))})
+            except (TypeError, ValueError):
+                pass
+
+        return {"anchor_marks": anchor_marks, "remarks": remarks}
+
+    log.warning("parse_annotation_response failed page=%s raw=%r", page_num, (raw or "")[:200])
+    return {"anchor_marks": [], "remarks": []}
 
 
 def _coerce_page_type(raw: str) -> str:
@@ -632,6 +811,42 @@ def _ocr_single_page(
     return f"=== PAGE {page_num} ===\n{page_text}"
 
 
+def _annotations_grid_to_pct(
+    anchor_marks: list[dict[str, Any]],
+    remarks: list[dict[str, Any]],
+    page: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Convert grid coords (1-50) to percentage coords (0-100) and attach page number."""
+    out_anchors: list[dict[str, Any]] = []
+    for a in anchor_marks:
+        cx_pct, cy_pct = grid_to_pct(a["cx"], a["cy"])
+        rx_pct, _ = grid_to_pct(a["rx"] + 1, 1)   # radius: shift from origin
+        _, ry_pct = grid_to_pct(1, a["ry"] + 1)
+        out_anchors.append({
+            "type": a["type"],
+            "page": page,
+            "cx_pct": round(cx_pct, 2),
+            "cy_pct": round(cy_pct, 2),
+            "rx_pct": round(rx_pct, 2),
+            "ry_pct": round(ry_pct, 2),
+        })
+
+    out_remarks: list[dict[str, Any]] = []
+    for r in remarks:
+        x1_pct, y1_pct = grid_to_pct(r["x1"], r["y1"])
+        x2_pct, y2_pct = grid_to_pct(r["x2"], r["y2"])
+        out_remarks.append({
+            "page": page,
+            "x1_pct": round(x1_pct, 2),
+            "y1_pct": round(y1_pct, 2),
+            "x2_pct": round(x2_pct, 2),
+            "y2_pct": round(y2_pct, 2),
+            "comment": r.get("comment", ""),
+        })
+
+    return out_anchors, out_remarks
+
+
 def _structure_qa(
     client: genai.Client,
     pages_payload_json: str,
@@ -828,6 +1043,78 @@ def _structure_qa_with_fallback(
     return rows
 
 
+# --- Remarks enrichment ---------------------------------------------------------------
+
+
+def enrich_remarks_from_annotations(items: list[dict[str, Any]]) -> None:
+    """Fill remarks[].comment from the evaluation annotations array.
+
+    Called after ``merge_evaluations_into_items()`` has placed grading-generated
+    ``annotations`` onto each item. Each annotation carries a ``comment`` string and
+    a visual position (page_index 0-based, y_position_percent). This function:
+
+    1. Matches every annotation to the nearest unmatched remark box on the same page
+       (by y-centre distance).  If the best match is within 35 percentage points, the
+       remark's comment is set from the annotation.
+    2. Annotations that find no close-enough remark box get a **new remark entry**
+       built from the annotation's own coords.
+
+    Mutates items in-place; returns None.
+    """
+    for item in items:
+        remarks: list[dict[str, Any]] = item.get("remarks") or []
+        annotations: list[dict[str, Any]] = item.get("annotations") or []
+        if not annotations:
+            continue
+
+        matched_remark_indices: set[int] = set()
+
+        for ann in annotations:
+            try:
+                target_page = int(ann.get("page_index", 0)) + 1   # 0-based → 1-based
+                ann_y: float = float(ann.get("y_position_percent", 50))
+            except (TypeError, ValueError):
+                continue
+
+            best_idx: int | None = None
+            best_dist = float("inf")
+            for i, rem in enumerate(remarks):
+                if i in matched_remark_indices:
+                    continue
+                if rem.get("comment"):   # already has a comment from a previous annotation
+                    continue
+                if rem.get("page") != target_page:
+                    continue
+                y_centre = (float(rem.get("y1_pct", 0)) + float(rem.get("y2_pct", 0))) / 2.0
+                dist = abs(ann_y - y_centre)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+
+            if best_idx is not None and best_dist < 35.0:
+                remarks[best_idx]["comment"] = str(ann.get("comment", ""))
+                matched_remark_indices.add(best_idx)
+            else:
+                # No nearby remark box — create one from annotation coords.
+                try:
+                    x1 = float(ann.get("x_start_percent", 5))
+                    x2 = float(ann.get("x_end_percent", 45))
+                    y1 = max(0.0, ann_y - 5.0)
+                    y2 = min(100.0, ann_y + 5.0)
+                    remarks.append({
+                        "page": target_page,
+                        "x1_pct": round(x1, 2),
+                        "y1_pct": round(y1, 2),
+                        "x2_pct": round(x2, 2),
+                        "y2_pct": round(y2, 2),
+                        "comment": str(ann.get("comment", "")),
+                    })
+                except (TypeError, ValueError):
+                    pass
+
+        item["remarks"] = remarks
+
+
 # --- Public API ------------------------------------------------------------------------
 
 
@@ -854,13 +1141,18 @@ def smart_ocr_extract_student_answers(
             f"PDF has {total_pages} page(s); maximum allowed is {max_pages} (COPY_OCR_MAX_PAGES)."
         )
 
-    run_classify = _env_bool("SMART_OCR_CLASSIFY", True)
-
-    # Layout / marking coords need sharper raster than coarse copy previews; enforce a high floor.
+    # OCR quality needs 300 DPI; grid overlay (for annotation coords) works at any DPI.
     dpi = max(300, copy_ocr_raster_dpi())
     png_pages = rasterize_pdf_to_png_pages(pdf_path, dpi=dpi, request_id=request_id)
     max_workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
 
+    # Draw the 50×50 reference grid onto every page (fast parallel PIL compositing).
+    grid_pages = batch_draw_grid(png_pages, max_workers=max_workers)
+    log.info("smart_ocr[%s] grid overlay drawn dpi=%s pages=%s", request_id, dpi, total_pages)
+
+    run_classify = _env_bool("SMART_OCR_CLASSIFY", True)
+
+    # --- Stage 1a: classify each page (parallel) ---
     classifications: list[str] = ["UNKNOWN"] * total_pages
 
     def _classify_job(idx: int) -> tuple[int, str]:
@@ -868,59 +1160,66 @@ def smart_ocr_extract_student_answers(
         if not run_classify:
             return idx, "UNKNOWN"
         try:
-            label = _classify_page(
-                api_key, png_pages[idx], pno, total_pages, language
-            )
-            log.info(
-                "smart_ocr[%s] classify page=%s/%s -> %s",
-                request_id,
-                pno,
-                total_pages,
-                label,
-            )
+            label = _classify_page(api_key, png_pages[idx], pno, total_pages, language)
+            log.info("smart_ocr[%s] classify page=%s/%s -> %s", request_id, pno, total_pages, label)
             return idx, label
         except Exception as e:
-            log.warning(
-                "smart_ocr[%s] classify failed page=%s: %s",
-                request_id,
-                pno,
-                e,
-            )
+            log.warning("smart_ocr[%s] classify failed page=%s: %s", request_id, pno, e)
             return idx, "UNKNOWN"
 
-    # --- Stage 1a: classify each page (parallel) ---
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         cls_futures = [pool.submit(_classify_job, i) for i in range(total_pages)]
         for fut in as_completed(cls_futures):
             idx, lbl = fut.result()
             classifications[idx] = lbl
 
-    # --- Stage 1b: type-aware OCR each page (parallel) ---
+    # --- Stage 1b: OCR + annotation detection (both submitted concurrently per page) ---
+    # OCR uses the original plain page image for maximum text quality.
+    # Annotation detection uses the grid-annotated image for precise visual coordinates.
+    # Both jobs run in the same pool → latency ≈ max(ocr, annotation) per page.
     page_blocks: list[str] = [""] * total_pages
+    page_anchor_marks: list[list[dict[str, Any]]] = [[] for _ in range(total_pages)]
+    page_remarks: list[list[dict[str, Any]]] = [[] for _ in range(total_pages)]
 
     def _ocr_job(idx: int) -> tuple[int, str]:
         pno = idx + 1
         pt = classifications[idx]
-        block = _ocr_single_page(
-            api_key, png_pages[idx], pno, total_pages, language, pt
-        )
+        block = _ocr_single_page(api_key, png_pages[idx], pno, total_pages, language, pt)
         log.info(
             "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
-            request_id,
-            pno,
-            total_pages,
-            pt,
-            len(block),
+            request_id, pno, total_pages, pt, len(block),
         )
         return idx, block
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        ocr_futures = [pool.submit(_ocr_job, i) for i in range(total_pages)]
-        for fut in as_completed(ocr_futures):
+    def _annotation_job(idx: int) -> tuple[int, dict[str, Any]]:
+        pno = idx + 1
+        try:
+            result = _detect_page_annotations(api_key, grid_pages[idx], pno, total_pages)
+            log.info(
+                "smart_ocr[%s] annotate page=%s/%s anchors=%s remarks=%s",
+                request_id, pno, total_pages, len(result["anchor_marks"]), len(result["remarks"]),
+            )
+            return idx, result
+        except Exception as e:
+            log.warning("smart_ocr[%s] annotate failed page=%s: %s", request_id, pno, e)
+            return idx, {"anchor_marks": [], "remarks": []}
+
+    # Use 2× workers so OCR and annotation jobs for all pages can overlap.
+    with ThreadPoolExecutor(max_workers=max_workers * 2) as pool:
+        ocr_futs = [pool.submit(_ocr_job, i) for i in range(total_pages)]
+        ann_futs = [pool.submit(_annotation_job, i) for i in range(total_pages)]
+        for fut in as_completed(ocr_futs):
             idx, block = fut.result()
             page_blocks[idx] = block
+        for fut in as_completed(ann_futs):
+            idx, result = fut.result()
+            anchors_pct, remarks_pct = _annotations_grid_to_pct(
+                result["anchor_marks"], result["remarks"], idx + 1
+            )
+            page_anchor_marks[idx] = anchors_pct
+            page_remarks[idx] = remarks_pct
 
-    # Deduplicate near-identical neighboring pages (uses DUPLICATE vs similarity rules).
+    # Deduplicate near-identical neighboring pages (unchanged logic, uses text only).
     page_blocks = _deduplicate_page_texts(page_blocks, classifications, request_id)
 
     log.info(
@@ -929,27 +1228,19 @@ def smart_ocr_extract_student_answers(
         sum(len(b) for b in page_blocks),
     )
 
-    # --- Stage 2: build per-page OCR JSON payload for structure pass ---
+    # --- Stage 2: build per-page OCR JSON payload for structure pass (text-only, unchanged) ---
     pages_payload = {"pages": []}
     for i, block in enumerate(page_blocks):
-        pages_payload["pages"].append(
-            {
-                "page": i + 1,
-                "text": _extract_page_body(block),
-            }
-        )
+        pages_payload["pages"].append({"page": i + 1, "text": _extract_page_body(block)})
     pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
     payload_tokens_est = len(pages_payload_json) // 4
     expected_questions = _estimate_expected_questions(page_blocks)
     log.info(
         "smart_ocr[%s] structure input_tokens_est=%s output_cap=%s expected_questions=%s",
-        request_id,
-        payload_tokens_est,
-        65536,
-        expected_questions,
+        request_id, payload_tokens_est, 65536, expected_questions,
     )
 
-    # --- Stage 3: structure from OCR JSON payload ---
+    # --- Stage 3: structure from OCR JSON payload (unchanged) ---
     structure_client = genai.Client(api_key=api_key)
     rows = _structure_qa_with_fallback(
         structure_client,
@@ -961,8 +1252,21 @@ def smart_ocr_extract_student_answers(
 
     log.info(
         "smart_ocr[%s] stage3 structure complete questions=%s",
-        request_id,
-        len(rows),
+        request_id, len(rows),
     )
+
+    # --- Merge per-page anchor_marks and remarks into items ---
+    # Collect all annotations whose page falls within [item.start_page, item.end_page].
+    all_anchors: list[dict[str, Any]] = []
+    all_remarks: list[dict[str, Any]] = []
+    for idx in range(total_pages):
+        all_anchors.extend(page_anchor_marks[idx])
+        all_remarks.extend(page_remarks[idx])
+
+    for item in rows:
+        sp = int(item.get("start_page", 1))
+        ep = int(item.get("end_page", sp))
+        item["anchor_marks"] = [a for a in all_anchors if sp <= a["page"] <= ep]
+        item["remarks"] = [r for r in all_remarks if sp <= r["page"] <= ep]
 
     return {"items": rows, "page_count": total_pages}

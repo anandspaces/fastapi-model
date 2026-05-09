@@ -14,7 +14,7 @@ from google.genai import types
 
 log = logging.getLogger(__name__)
 
-ANALYSE_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
+ANALYSE_MODEL = os.environ.get("GEMINI_MODEL")
 
 CFG_PAGES = types.GenerateContentConfig(
     temperature=0.2,
