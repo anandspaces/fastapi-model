@@ -33,7 +33,7 @@ import fitz  # PyMuPDF
 import numpy as np
 from scipy import ndimage
 
-CELL_SIZE_PTS: float = 5.0
+CELL_SIZE_PTS: float = 10.0
 RASTER_DPI: int = 300
 # Stricter thresholds so faint / light-gray ink still counts as "occupied":
 #   * brightness cut-off raised 0.45 -> 0.75 to catch pencil & faded pen strokes
