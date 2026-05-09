@@ -1521,6 +1521,7 @@ async def post_analyse_smart_ocr(
 
     flat_blocks_v2: dict | None = result.pop("_flat_blocks", None)
     v2_overlay_jpegs: list[bytes] | None = result.pop("_overlay_jpegs", None)
+    v2_cover_pages: list[int] = list(result.pop("_cover_pages", []) or [])
     page_count = result.get("page_count")
     items = result.get("items", [])
     if not isinstance(page_count, int) or page_count < 1:
@@ -1661,7 +1662,9 @@ async def post_analyse_smart_ocr(
             )
             # skipped_pages reads start_page/end_page off the placer's items;
             # compute it BEFORE reshaping (the wire shape drops those fields).
-            skipped_pages_fail = _smart_ocr_skipped_pages(page_count, items)
+            skipped_pages_fail = sorted(
+                set(_smart_ocr_skipped_pages(page_count, items)) | set(v2_cover_pages)
+            )
             response_items_fail = build_response_items(items, page_grids)
             # Don't fail the whole response — return OCR items with error note
             return JSONResponse(
@@ -1691,7 +1694,9 @@ async def post_analyse_smart_ocr(
         extra["modelId"] = mid
     # skipped_pages reads start_page/end_page off the placer's items;
     # compute it BEFORE reshaping (the wire shape drops those fields).
-    skipped_pages = _smart_ocr_skipped_pages(page_count, items)
+    skipped_pages = sorted(
+        set(_smart_ocr_skipped_pages(page_count, items)) | set(v2_cover_pages)
+    )
     response_items = build_response_items(items, page_grids)
 
     # Observe-only validation pass — counts I1–I9 invariant violations on

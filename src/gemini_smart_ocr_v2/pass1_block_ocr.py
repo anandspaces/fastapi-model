@@ -27,6 +27,14 @@ _PASS1_SCHEMA = types.Schema(
             type=types.Type.STRING,
             description="PARAGRAPH | WORD_LIST | CORRECTION | DUPLICATE | UNKNOWN",
         ),
+        "is_cover_page": types.Schema(
+            type=types.Type.BOOLEAN,
+            description=(
+                "True if this page is purely a cover/intro/personal-detail sheet "
+                "(Name/Roll/Date/Centre/Contact/Medium/Test number/Subject/Examiner-use) "
+                "with NO printed exam questions and NO real handwritten answers."
+            ),
+        ),
         "blocks": types.Schema(
             type=types.Type.ARRAY,
             items=types.Schema(
@@ -51,7 +59,7 @@ _PASS1_SCHEMA = types.Schema(
             ),
         ),
     },
-    required=["page", "page_type", "blocks"],
+    required=["page", "page_type", "is_cover_page", "blocks"],
 )
 
 
@@ -75,6 +83,7 @@ The image shows the original sheet with a cell grid; each cell is labelled (A1, 
 
 TASK — emit ONE JSON object (schema enforced):
 - ``page_type``: coarse layout guess (PARAGRAPH, WORD_LIST, CORRECTION, DUPLICATE, UNKNOWN).
+- ``is_cover_page``: TRUE only when the entire page is personal/cover info (Name, Roll, Date, Centre, Contact, Medium, Test number, Subject, Examiner-use boxes) with NO printed exam questions AND NO real handwritten answers. Otherwise FALSE — even if the page also contains a small header strip with student details.
 - ``blocks``: ordered TOP-TO-BOTTOM. Each block is ONE logical unit (paragraph, list block, printed stem, header strip, score box — NOT one sentence each).
 
 For EACH block set:

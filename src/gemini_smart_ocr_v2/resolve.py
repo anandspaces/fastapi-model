@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
@@ -11,15 +10,7 @@ from cell_grid_service_v4 import PageCellGrid, cell_id_from_rc, detect_marking_b
 from .snap import bounding_range_string, cells_from_range_strings, leftmost_writable_cell_in_ranges
 
 
-log = logging.getLogger(__name__)
-
 _BLOCK_PAGE_RE = re.compile(r"^p(\d+)-", re.I)
-
-_COVER_SECTION_RE = re.compile(
-    r"\b(student\s*detail|personal\s*detail|cover|intro|preamble|"
-    r"examiner\s*use|roll\s*info|booklet\s*detail)\b",
-    re.IGNORECASE,
-)
 
 
 def _page_from_block_id(block_id: str) -> int | None:
@@ -149,9 +140,6 @@ def resolve_sections_to_items(
         if not isinstance(sec, dict):
             continue
         section_name = str(sec.get("section_name") or "General").strip() or "General"
-        if _COVER_SECTION_RE.search(section_name):
-            log.info("resolve: dropping cover-like section %r", section_name)
-            continue
         questions = sec.get("questions")
         if not isinstance(questions, list):
             continue
@@ -169,28 +157,15 @@ def resolve_sections_to_items(
             if not isinstance(arefs, list):
                 arefs = []
 
-            has_printed_question = False
             q_text_parts: list[str] = []
             for ref in qrefs:
                 b = flat_blocks.get(str(ref))
-                if not b:
-                    continue
-                if str(b.get("kind")) == "printed_question":
-                    has_printed_question = True
-                q_text_parts.append(str(b.get("text") or "").strip())
+                if b:
+                    q_text_parts.append(str(b.get("text") or "").strip())
             question_text = "\n\n".join(x for x in q_text_parts if x)
             stem_hint = str(row.get("question") or "").strip()
             if stem_hint:
                 question_text = stem_hint if not question_text else f"{question_text}\n\n{stem_hint}"
-
-            if not has_printed_question and not stem_hint:
-                log.info(
-                    "resolve: dropping fabricated item qid=%s section=%r "
-                    "(no printed_question ref and no stem hint — likely cover/intro)",
-                    qid,
-                    section_name,
-                )
-                continue
 
             ans_parts: list[str] = []
             for ref in arefs:

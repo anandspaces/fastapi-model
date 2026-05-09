@@ -82,8 +82,6 @@ RULES:
 - Order ``answer_block_refs`` in reading order.
 - Match numbered stems to the intended handwritten continuation across pages.
 - Cover pages 1..{total_pages}; headers that are not answers should not appear in answer_block_refs.
-- COVER / INTRO / PERSONAL-DETAIL pages (Name, Roll, Date, Centre, Contact, Medium, Test number, Subject, Examiner-use boxes, etc.) must NOT become questions. Skip those blocks entirely — do not create a section, do not create a question_id, do not place them in answer_block_refs.
-- Every emitted question MUST have at least one ``printed_question`` block in ``question_block_refs``. Do not fabricate questions from handwritten-only blocks.
 
 {script}
 

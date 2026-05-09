@@ -106,10 +106,19 @@ def smart_ocr_extract_student_answers_v2(
 
     flat_blocks: dict[str, dict[str, Any]] = {}
     pages_payload: list[dict[str, Any]] = []
+    cover_pages: list[int] = []
     for i, pg in enumerate(page_results):
         if pg is None:
             raise RuntimeError(f"Pass1 missing page index {i}")
         page_no = int(pg.get("page") or i + 1)
+        if bool(pg.get("is_cover_page")):
+            cover_pages.append(page_no)
+            log.info(
+                "smart_ocr_v2[%s] page=%s flagged is_cover_page=True — dropping blocks",
+                request_id,
+                page_no,
+            )
+            continue
         blocks = pg.get("blocks") or []
         pages_payload.append(
             {
@@ -143,10 +152,11 @@ def smart_ocr_extract_student_answers_v2(
     )
 
     log.info(
-        "smart_ocr_v2[%s] complete items=%s blocks=%s",
+        "smart_ocr_v2[%s] complete items=%s blocks=%s cover_pages=%s",
         request_id,
         len(items),
         len(flat_blocks),
+        cover_pages,
     )
 
     return {
@@ -154,4 +164,5 @@ def smart_ocr_extract_student_answers_v2(
         "page_count": total_pages,
         "_flat_blocks": flat_blocks,
         "_overlay_jpegs": overlay_images,
+        "_cover_pages": cover_pages,
     }
