@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -35,30 +36,11 @@ def _env_bool(name: str, default: bool = True) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-# --- Stage 1: page classification (tiny JSON per page) ---------------------------------
-
-_CLASSIFY_SCHEMA = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "page_type": types.Schema(
-            type=types.Type.STRING,
-            description=(
-                "Exactly one of: DUPLICATE, CORRECTION, PARAGRAPH, WORD_LIST, UNKNOWN. "
-                "DUPLICATE = second sheet visually same as question+answer duplicate; "
-                "CORRECTION = short line/sentence fixes; PARAGRAPH = long prose / अर्थ+प्रयोग; "
-                "WORD_LIST = pairs, विलोम, उपसर्ग/प्रत्यय tables."
-            ),
-        ),
-    },
-    required=["page_type"],
-    property_ordering=["page_type"],
-)
-
 _PAGE_TYPES = frozenset(
     {"DUPLICATE", "CORRECTION", "PARAGRAPH", "WORD_LIST", "UNKNOWN"}
 )
 
-# --- Unified page schema (classify + OCR + annotations in one call) --------------------
+# --- Annotation schemas ---------------------------------------------------------------
 
 _ANCHOR_MARK_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
@@ -95,65 +77,357 @@ _REMARK_BOX_SCHEMA = types.Schema(
     property_ordering=["x1", "y1", "x2", "y2", "comment"],
 )
 
-_ANNOTATION_ONLY_SCHEMA = types.Schema(
+_LAYOUT_ZONE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
+        "y1": types.Schema(type=types.Type.INTEGER, description="First grid row of handwriting band (6-45)"),
+        "y2": types.Schema(type=types.Type.INTEGER, description="Last grid row of handwriting band (6-45)"),
+    },
+    required=["y1", "y2"],
+    property_ordering=["y1", "y2"],
+)
+
+_CLASSIFY_ANNOTATION_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "page_type": types.Schema(
+            type=types.Type.STRING,
+            description=(
+                "Exactly one of: DUPLICATE, CORRECTION, PARAGRAPH, WORD_LIST, UNKNOWN. "
+                "DUPLICATE = visually identical layout to another sheet in this booklet. "
+                "CORRECTION = short line/sentence fixes, numbered one-line corrections. "
+                "PARAGRAPH = long prose answers, अर्थ/प्रयोग style blocks. "
+                "WORD_LIST = word pairs, विलोम, उपसर्ग/प्रत्यय tables. "
+                "UNKNOWN = none of the above clearly fits."
+            ),
+        ),
+        "content_bands": types.Schema(
+            type=types.Type.ARRAY,
+            items=_LAYOUT_ZONE_SCHEMA,
+            description=(
+                "Contiguous y-row bands (rows 6–45 only) that contain student handwriting. "
+                "Top rows 1-5 and bottom rows 46-50 are always margin — never include them. "
+                "Right margin columns 38-50 are always structurally free and are NOT content."
+            ),
+        ),
         "anchor_marks": types.Schema(
             type=types.Type.ARRAY,
             items=_ANCHOR_MARK_SCHEMA,
-            description="3-5 teacher markup spots (circle/ellipse/underline/tick) identified visually.",
+            description="3-5 SUGGESTED teacher markup positions on student handwriting.",
         ),
         "remarks": types.Schema(
             type=types.Type.ARRAY,
             items=_REMARK_BOX_SCHEMA,
-            description="1-3 free-whitespace bounding boxes suitable for written teacher comments.",
+            description="2-4 free-whitespace bounding boxes in FREE ZONES only (see content_bands). Spread them across the full vertical range of the page — early, middle, and late y positions.",
         ),
     },
-    required=["anchor_marks", "remarks"],
-    property_ordering=["anchor_marks", "remarks"],
+    required=["page_type", "content_bands", "anchor_marks", "remarks"],
+    property_ordering=["page_type", "content_bands", "anchor_marks", "remarks"],
 )
 
 
-def _build_annotation_detect_prompt(page_num: int, total_pages: int) -> str:
+def _build_classify_annotation_prompt(page_num: int, total_pages: int, language: str) -> str:
+    lang = (language or "en").strip().lower()
+    script = (
+        "Hindi (Devanagari) and/or English may appear."
+        if lang == "hi"
+        else "English and/or Hindi may appear."
+    )
     return f"""You see page {page_num} of {total_pages} from a handwritten exam answer book.
+{script}
 A 50×50 reference grid is drawn on the image.
-  Columns 1–50: left edge → right (~2 % natural margin at far right).
-  Rows    1–50: top edge  → bottom (~2 % natural margin at bottom).
+  Columns 1–50: left edge → right (~2% natural margin at column 50).
+  Rows    1–50: top edge  → bottom (~2% natural margin at row 50).
 
-Return JSON with exactly TWO fields:
+STEP 1 — Classify the page. Choose exactly one page_type:
+- DUPLICATE  — layout visually identical to another sheet already in this booklet.
+- CORRECTION — mostly short sentence/line corrections, numbered one-line fixes.
+- PARAGRAPH  — long prose answers, paragraphs, अर्थ/प्रयोग style blocks.
+- WORD_LIST  — word pairs, विलोम, उपसर्ग/प्रत्यय tables, tabular lists.
+- UNKNOWN    — none of the above clearly fits.
 
-1. anchor_marks — 3–5 teacher markup spots visible on this page:
-   • "circle"    : small circle around a key term/number. rx ≈ 1–2 grid units.
-   • "ellipse"   : oval over a phrase. rx = half span, ry ≈ 1–2.
-   • "underline" : straight line under text. cx/cy = line centre, rx = half span, ry = 0.
-   • "tick"      : check-mark beside a correct item. rx = 0, ry = 0.
-   Use the grid numbers visible in the image to pinpoint each spot precisely.
+STEP 2 — If page_type is DUPLICATE, output exactly:
+{{"page_type":"DUPLICATE","content_bands":[],"anchor_marks":[],"remarks":[]}}
+and stop. Skip Steps 3, 4, and 5.
 
-2. remarks — 1–3 FREE WHITESPACE bounding boxes for teacher written comments.
-   STRICT RULES:
-   • x2 MUST be strictly greater than x1 (NEVER x1 == x2).
-   • y2 MUST be strictly greater than y1 (NEVER y1 == y2).
-   • Width (x2 - x1) ≥ 5 grid units; height (y2 - y1) ≥ 3 grid units.
-   • Place ONLY in genuinely blank areas (no handwriting inside).
-   • Right-margin example: {{"x1":38,"y1":20,"x2":49,"y2":35,"comment":""}}
-   • Gap example:          {{"x1":5,"y1":62,"x2":48,"y2":72,"comment":""}}
-   • Set comment to "" always.
+STEP 3 — Map the page layout. Scan top-to-bottom using grid row numbers.
+Identify every contiguous band of rows containing STUDENT HANDWRITING.
+  • Focus on handwritten ink only — ignore pre-printed question text, ruled lines, boxes.
+  • The TOP MARGIN (rows 1–5) is always free — never list it as content.
+  • The BOTTOM MARGIN (rows 46–50) is always free — never list it as content.
+  • The RIGHT MARGIN strip (columns 38–50) is structurally free throughout — content stays in columns 1–37.
+Record each handwriting band: {{"y1": first_row_with_ink, "y2": last_row_with_ink}}.
+Example — writing rows 8–22, blank gap, then writing rows 28–43:
+  content_bands: [{{"y1":8,"y2":22}},{{"y1":28,"y2":43}}]
+FREE ZONES this creates:
+  • Right margin  : columns 38–49, rows 6–45 (always available)
+  • Horizontal gaps: y-ranges NOT covered by any content band, within rows 6–45
 
-All coordinates must be integers in [1, 50]. Never output x1 == x2 or y1 == y2."""
+STEP 4 — Suggest anchor mark positions (3–5) for teacher markup on the student's handwriting.
+These are NOT existing marks — recommend where a teacher should annotate:
+   • "underline" : under a key term or phrase the student wrote. cx/cy = text centre, rx = half span, ry = 0.
+   • "circle"    : around a key number, date, or fact. rx ≈ 1–2 grid units.
+   • "ellipse"   : over a key multi-word phrase. rx = half span, ry ≈ 1–2.
+   • "tick"      : beside a correct bullet point or numbered item. rx = 0, ry = 0.
+   Use grid numbers in the image to pinpoint each spot precisely.
+
+STEP 5 — Place remark boxes (2–4) using ONLY the FREE ZONES from STEP 3.
+   DISTRIBUTION: spread them across the full vertical height — place one in the top third,
+   one in the middle third, and one or two in the bottom third of the content zone.
+   Do NOT cluster all boxes near the top.
+   RULES (non-negotiable):
+   1. PREFER right margin first: x1 ≥ 38, x2 ≤ 49, y1 ≥ 6, y2 ≤ 45.
+   2. Use a horizontal gap ONLY when no right-margin space is available.
+      A gap is valid only if the ENTIRE span [y1, y2] falls OUTSIDE all content_bands.
+   3. NEVER let a remark overlap any content_band. If band {{"y1":8,"y2":22}} exists,
+      a remark with y1=15 would overlap — forbidden unless x1 ≥ 38.
+   4. NEVER place where y1 < 6 or y2 > 45 (fixed top/bottom margins).
+   5. x2 > x1 always. y2 > y1 always. Width ≥ 5 units. Height ≥ 3 units.
+   6. comment = "" always.
+   Right-margin example: {{"x1":39,"y1":10,"x2":49,"y2":22,"comment":""}}
+   Gap example (only if gap exists between band end and next band start):
+     {{"x1":5,"y1":23,"x2":37,"y2":27,"comment":""}}
+
+All coordinates: integers in [1, 50]."""
 
 
-def _detect_page_annotations(
+def _parse_content_bands(raw_bands: Any) -> list[dict[str, float]]:
+    """Parse content_bands array from Gemini response into validated grid-coordinate dicts."""
+    if not isinstance(raw_bands, list):
+        return []
+    bands: list[dict[str, float]] = []
+    for b in raw_bands:
+        if not isinstance(b, dict):
+            continue
+        try:
+            y1 = max(1.0, min(50.0, float(b.get("y1", 1))))
+            y2 = max(1.0, min(50.0, float(b.get("y2", 50))))
+            if y2 > y1:
+                bands.append({"y1": y1, "y2": y2})
+        except (TypeError, ValueError):
+            pass
+    return bands
+
+
+def _filter_overlapping_remarks(
+    remarks: list[dict[str, Any]],
+    content_bands: list[dict[str, float]],
+    page_num: int = 0,
+) -> list[dict[str, Any]]:
+    """Remove remark boxes that overlap with identified handwriting zones.
+
+    Right-margin remarks (x1 >= 38) are always kept — student writing stays in
+    columns 1-37, so the right margin is free at any y position.
+    Horizontal-gap remarks are dropped if their y-span intersects any content band.
+    """
+    if not content_bands:
+        return remarks
+    result: list[dict[str, Any]] = []
+    for r in remarks:
+        x1_grid = float(r.get("x1", 5))
+        x2_grid = float(r.get("x2", 50))
+        y1_grid = float(r.get("y1", 1))
+        y2_grid = float(r.get("y2", 50))
+        if x1_grid >= 38:
+            log.info(
+                "  remark_filter[p%s] KEPT  right_margin x[%.0f-%.0f] y[%.0f-%.0f]",
+                page_num, x1_grid, x2_grid, y1_grid, y2_grid,
+            )
+            result.append(r)
+            continue
+        overlapping_band = next(
+            (b for b in content_bands if y1_grid < b["y2"] and y2_grid > b["y1"]), None
+        )
+        if overlapping_band is None:
+            log.info(
+                "  remark_filter[p%s] KEPT  gap         x[%.0f-%.0f] y[%.0f-%.0f]",
+                page_num, x1_grid, x2_grid, y1_grid, y2_grid,
+            )
+            result.append(r)
+        else:
+            log.info(
+                "  remark_filter[p%s] DROP  overlap     x[%.0f-%.0f] y[%.0f-%.0f]"
+                "  hits_band y[%.0f-%.0f]",
+                page_num, x1_grid, x2_grid, y1_grid, y2_grid,
+                overlapping_band["y1"], overlapping_band["y2"],
+            )
+    return result
+
+
+_REM_RIGHT_X1 = 76.0   # right margin left edge  (~grid 39 → pct)
+_REM_RIGHT_X2 = 96.0   # right margin right edge (~grid 49 → pct)
+_REM_LEFT_X1  =  2.0   # left margin left edge   (~grid 2  → pct)
+_REM_LEFT_X2  = 20.0   # left margin right edge  (~grid 11 → pct)
+_REM_Y_MIN    =  8.0   # top guard (% from top)
+_REM_Y_MAX    = 90.0   # bottom guard (% from top)
+_REM_MIN_H    =  4.0   # minimum remark box height in %
+
+
+def _spread_remarks_two_column(
+    remarks_pct: list[dict[str, Any]],
+    page_num: int = 0,
+) -> list[dict[str, Any]]:
+    """Re-layout a single page's remarks into right + left margin with no overlaps.
+
+    Right margin (x1~76%) is always tried first. When a remark's ideal y position
+    is already occupied by the previous right-column remark, the new remark is placed
+    in the left margin (x1~2%) at its ideal y — creating natural left/right alternation
+    for dense pages while keeping sparse pages entirely in the right margin.
+    When both columns need vertical push-down, the one needing less movement wins.
+    Remarks that overflow past _REM_Y_MAX in both columns are dropped silently.
+    """
+    if not remarks_pct:
+        return []
+
+    sorted_r = sorted(remarks_pct, key=lambda r: r.get("y1_pct", 0.0))
+
+    log.info(
+        "spread[p%s] input  %s",
+        page_num,
+        " ".join(
+            f"x[{r.get('x1_pct',0):.0f}-{r.get('x2_pct',0):.0f}]"
+            f"y[{r.get('y1_pct',0):.0f}-{r.get('y2_pct',0):.0f}]"
+            for r in sorted_r
+        ),
+    )
+
+    right_top = _REM_Y_MIN   # next free y in right column
+    left_top  = _REM_Y_MIN   # next free y in left column
+    result: list[dict[str, Any]] = []
+
+    for orig in sorted_r:
+        r = dict(orig)
+        h = max(r.get("y2_pct", 0.0) - r.get("y1_pct", 0.0), _REM_MIN_H)
+        ideal = max(_REM_Y_MIN, r.get("y1_pct", _REM_Y_MIN))
+
+        ry1 = max(ideal, right_top)
+        ry2 = ry1 + h
+        ly1 = max(ideal, left_top)
+        ly2 = ly1 + h
+
+        right_fits = ry2 <= _REM_Y_MAX
+        left_fits  = ly2 <= _REM_Y_MAX
+
+        if not right_fits and not left_fits:
+            log.info(
+                "  spread[p%s] DROP  no_space ideal_y=%.0f right_top=%.0f left_top=%.0f",
+                page_num, ideal, right_top, left_top,
+            )
+            continue   # page is full — drop
+
+        # Prefer right; switch to left when left starts closer to the ideal y.
+        if right_fits and (not left_fits or ry1 <= ly1):
+            col = "R"
+            r.update({"x1_pct": _REM_RIGHT_X1, "x2_pct": _REM_RIGHT_X2,
+                       "y1_pct": round(ry1, 2), "y2_pct": round(ry2, 2)})
+            right_top = ry2
+        else:
+            col = "L"
+            r.update({"x1_pct": _REM_LEFT_X1, "x2_pct": _REM_LEFT_X2,
+                       "y1_pct": round(ly1, 2), "y2_pct": round(ly2, 2)})
+            left_top = ly2
+
+        log.info(
+            "  spread[p%s] %s  ideal_y=%.0f → y[%.0f-%.0f]  push=%.0fpx",
+            page_num, col, ideal, r["y1_pct"], r["y2_pct"], r["y1_pct"] - ideal,
+        )
+        result.append(r)
+
+    log.info(
+        "spread[p%s] output R=%s L=%s",
+        page_num,
+        " ".join(f"y[{r['y1_pct']:.0f}-{r['y2_pct']:.0f}]" for r in result if r["x1_pct"] >= 50),
+        " ".join(f"y[{r['y1_pct']:.0f}-{r['y2_pct']:.0f}]" for r in result if r["x1_pct"] < 50),
+    )
+    return result
+
+
+def _deoverlap_item_remarks(remarks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-spread all remarks for one item after enrichment to eliminate any new overlaps.
+
+    Groups by page, then runs _spread_remarks_two_column on each page's complete
+    remark set. Guarantees no remark-to-remark overlap in the final output,
+    even when enrich_remarks_from_annotations appended fallback boxes.
+    """
+    by_page: dict[int, list[dict[str, Any]]] = {}
+    for r in remarks:
+        pg = int(r.get("page", 0))
+        by_page.setdefault(pg, []).append(r)
+
+    result: list[dict[str, Any]] = []
+    for pg in sorted(by_page.keys()):
+        result.extend(_spread_remarks_two_column(by_page[pg], page_num=pg))
+    return result
+
+
+def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, Any]:
+    """Parse combined classify+annotation JSON → {page_type, anchor_marks, remarks}."""
+    base = _parse_annotation_response(raw, page_num)
+    page_type = "UNKNOWN"
+    content_bands: list[dict[str, float]] = []
+    for candidate in (_strip_json_fence(raw), _repair_json(raw)):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("page_type") is not None:
+            page_type = _coerce_page_type(str(data["page_type"]))
+            content_bands = _parse_content_bands(data.get("content_bands", []))
+            break
+
+    # ── Diagnostic: layout analysis ──────────────────────────────────────────
+    sorted_bands = sorted(content_bands, key=lambda b: b["y1"])
+    free_zones: list[str] = []
+    prev = 6.0
+    for band in sorted_bands:
+        if band["y1"] > prev + 0.5:
+            free_zones.append(f"gap[{prev:.0f}-{band['y1']:.0f}]")
+        prev = max(prev, band["y2"])
+    if prev < 45.0:
+        free_zones.append(f"gap[{prev:.0f}-45]")
+    free_zones.insert(0, "right_margin[38-49,y6-45]")  # always available
+
+    raw_remarks = base.get("remarks", [])
+    log.info(
+        "layout[p%s] type=%-10s bands=%s",
+        page_num, page_type,
+        " ".join(f"y[{b['y1']:.0f}-{b['y2']:.0f}]" for b in sorted_bands) or "(none)",
+    )
+    log.info(
+        "layout[p%s] free_zones=%s",
+        page_num, " ".join(free_zones),
+    )
+    log.info(
+        "layout[p%s] remarks_from_ai=%s",
+        page_num,
+        " ".join(
+            f"x[{r.get('x1',0):.0f}-{r.get('x2',0):.0f}]y[{r.get('y1',0):.0f}-{r.get('y2',0):.0f}]"
+            for r in raw_remarks
+        ) or "(none)",
+    )
+    # ─────────────────────────────────────────────────────────────────────────
+
+    if page_type == "DUPLICATE":
+        return {"page_type": "DUPLICATE", "anchor_marks": [], "remarks": []}
+    # Server-side safety: remove any remarks that landed on content zones.
+    base["remarks"] = _filter_overlapping_remarks(base["remarks"], content_bands, page_num)
+    return {"page_type": page_type, **base}
+
+
+def _classify_and_annotate_page(
     api_key: str,
     grid_png: bytes,
     page_num: int,
     total_pages: int,
+    language: str,
 ) -> dict[str, Any]:
-    """Annotation-only call: detect anchor_marks and remark boxes from a grid-annotated image.
+    """Combined classify + annotation call using grid PNG.
 
-    Runs in parallel with the OCR call. Returns {anchor_marks, remarks} with grid coordinates.
+    Returns {"page_type": str, "anchor_marks": [...], "remarks": [...]}.
+    Falls back to page_type="UNKNOWN" and empty lists on failure.
     """
     client = genai.Client(api_key=api_key)
-    prompt = _build_annotation_detect_prompt(page_num, total_pages)
+    prompt = _build_classify_annotation_prompt(page_num, total_pages, language)
     parts = [
         types.Part.from_text(text=prompt),
         types.Part.from_bytes(data=grid_png, mime_type="image/png"),
@@ -162,7 +436,7 @@ def _detect_page_annotations(
         temperature=0.0,
         max_output_tokens=4096,
         response_mime_type="application/json",
-        response_schema=_ANNOTATION_ONLY_SCHEMA,
+        response_schema=_CLASSIFY_ANNOTATION_SCHEMA,
     )
     last_raw = ""
     for attempt in range(1, 3):
@@ -172,15 +446,14 @@ def _detect_page_annotations(
             if attempt < 2:
                 time.sleep(0.5)
             continue
-        # Parse with _parse_annotation_response
-        result = _parse_annotation_response(last_raw, page_num)
-        if result["anchor_marks"] or result["remarks"]:
+        log.info("classify_annotate[p%s] raw_response=%s", page_num, last_raw)
+        result = _parse_classify_annotation_response(last_raw, page_num)
+        if result["page_type"] != "UNKNOWN" or result["anchor_marks"] or result["remarks"]:
             return result
         if attempt < 2:
             time.sleep(0.5)
-
-    log.warning("detect_page_annotations: empty page=%s raw=%r", page_num, last_raw[:200])
-    return {"anchor_marks": [], "remarks": []}
+    log.warning("classify_and_annotate: fallback page=%s raw=%r", page_num, last_raw[:200])
+    return {"page_type": "UNKNOWN", "anchor_marks": [], "remarks": []}
 
 
 def _parse_annotation_response(raw: str, page_num: int) -> dict[str, Any]:
@@ -241,79 +514,6 @@ def _coerce_page_type(raw: str) -> str:
     t = (raw or "").strip().upper().replace(" ", "_")
     if t in _PAGE_TYPES:
         return t
-    return "UNKNOWN"
-
-
-def _parse_classify_response(raw: str) -> str | None:
-    """Parse page_type from classify response; JSON first, then regex (handles preamble / truncation)."""
-    text = (raw or "").strip()
-    if not text:
-        return None
-    try:
-        data = json.loads(_strip_json_fence(text))
-        if isinstance(data, dict) and data.get("page_type") is not None:
-            return _coerce_page_type(str(data["page_type"]))
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r'"page_type"\s*:\s*"([^"]*)"', text, re.I)
-    if m:
-        val = (m.group(1) or "").strip()
-        if val:
-            return _coerce_page_type(val)
-    return None
-
-
-def _classify_page(
-    api_key: str,
-    png: bytes,
-    page_num: int,
-    total_pages: int,
-    language: str,
-) -> str:
-    client = genai.Client(api_key=api_key)
-    lang = (language or "en").strip().lower()
-    script = "Hindi (Devanagari) and/or English may appear." if lang == "hi" else "English and/or Hindi may appear."
-    prompt = f"""You see ONE page (page {page_num} of {total_pages}) from a handwritten exam answer book (e.g. UPSC Hindi).
-{script}
-
-Choose exactly one page_type (JSON only, no markdown):
-
-- DUPLICATE — same layout as a typical "question paper + answer" duplicate of another page (repeated sheet).
-- CORRECTION — mostly short sentence/line corrections (e.g. वाक्य शुद्धि), numbered one-line fixes.
-- PARAGRAPH — long answers, paragraphs, अर्थ / प्रयोग style blocks.
-- WORD_LIST — word pairs, opposites (विलोम), उपसर्ग/प्रत्यय breakdowns, tabular lists.
-- UNKNOWN — none of the above clearly fits.
-
-Return: {{"page_type":"..."}} with one of the five strings above."""
-
-    parts = [
-        types.Part.from_text(text=prompt),
-        types.Part.from_bytes(data=png, mime_type="image/png"),
-    ]
-    cfg = types.GenerateContentConfig(
-        temperature=0.0,
-        max_output_tokens=512,
-        response_mime_type="application/json",
-        response_schema=_CLASSIFY_SCHEMA,
-    )
-    last_raw = ""
-    for attempt in range(1, 3):
-        resp = client.models.generate_content(
-            model=MODEL_ID,
-            contents=parts,
-            config=cfg,
-        )
-        last_raw = (getattr(resp, "text", None) or "").strip()
-        if not last_raw:
-            if attempt < 2:
-                time.sleep(0.25)
-            continue
-        parsed = _parse_classify_response(last_raw)
-        if parsed is not None:
-            return parsed
-        if attempt < 2:
-            time.sleep(0.25)
-    log.warning("classify_page: parse failed page=%s raw=%r", page_num, last_raw[:200])
     return "UNKNOWN"
 
 
@@ -1091,28 +1291,29 @@ def enrich_remarks_from_annotations(items: list[dict[str, Any]]) -> None:
                     best_dist = dist
                     best_idx = i
 
-            if best_idx is not None and best_dist < 35.0:
+            if best_idx is not None and best_dist <= 20.0:
                 remarks[best_idx]["comment"] = str(ann.get("comment", ""))
                 matched_remark_indices.add(best_idx)
             else:
-                # No nearby remark box — create one from annotation coords.
+                # No nearby remark box — create one in the right margin.
+                # Never use annotation x-coords: those span the answer area (10-90%).
                 try:
-                    x1 = float(ann.get("x_start_percent", 5))
-                    x2 = float(ann.get("x_end_percent", 45))
-                    y1 = max(0.0, ann_y - 5.0)
-                    y2 = min(100.0, ann_y + 5.0)
+                    y1 = max(_REM_Y_MIN, ann_y - 5.0)
+                    y2 = min(_REM_Y_MAX, ann_y + 5.0)
+                    if y2 - y1 < _REM_MIN_H:
+                        y2 = min(_REM_Y_MAX, y1 + _REM_MIN_H)
                     remarks.append({
                         "page": target_page,
-                        "x1_pct": round(x1, 2),
+                        "x1_pct": _REM_RIGHT_X1,
                         "y1_pct": round(y1, 2),
-                        "x2_pct": round(x2, 2),
+                        "x2_pct": _REM_RIGHT_X2,
                         "y2_pct": round(y2, 2),
                         "comment": str(ann.get("comment", "")),
                     })
                 except (TypeError, ValueError):
                     pass
 
-        item["remarks"] = remarks
+        item["remarks"] = _deoverlap_item_remarks(remarks)
 
 
 # --- Public API ------------------------------------------------------------------------
@@ -1150,40 +1351,51 @@ def smart_ocr_extract_student_answers(
     grid_pages = batch_draw_grid(png_pages, max_workers=max_workers)
     log.info("smart_ocr[%s] grid overlay drawn dpi=%s pages=%s", request_id, dpi, total_pages)
 
-    run_classify = _env_bool("SMART_OCR_CLASSIFY", True)
-
-    # --- Stage 1a: classify each page (parallel) ---
-    classifications: list[str] = ["UNKNOWN"] * total_pages
-
-    def _classify_job(idx: int) -> tuple[int, str]:
-        pno = idx + 1
-        if not run_classify:
-            return idx, "UNKNOWN"
-        try:
-            label = _classify_page(api_key, png_pages[idx], pno, total_pages, language)
-            log.info("smart_ocr[%s] classify page=%s/%s -> %s", request_id, pno, total_pages, label)
-            return idx, label
-        except Exception as e:
-            log.warning("smart_ocr[%s] classify failed page=%s: %s", request_id, pno, e)
-            return idx, "UNKNOWN"
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        cls_futures = [pool.submit(_classify_job, i) for i in range(total_pages)]
-        for fut in as_completed(cls_futures):
-            idx, lbl = fut.result()
-            classifications[idx] = lbl
-
-    # --- Stage 1b: OCR + annotation detection (both submitted concurrently per page) ---
-    # OCR uses the original plain page image for maximum text quality.
-    # Annotation detection uses the grid-annotated image for precise visual coordinates.
-    # Both jobs run in the same pool → latency ≈ max(ocr, annotation) per page.
+    # --- Stage 1: OCR + classify+annotate submitted simultaneously ---
+    # classify+annotate uses grid PNG → page_type + anchor_marks + remarks in one call.
+    # OCR uses plain PNG for text quality; waits briefly for page_type to short-circuit
+    # DUPLICATE pages and avoid wasting OCR tokens.
     page_blocks: list[str] = [""] * total_pages
     page_anchor_marks: list[list[dict[str, Any]]] = [[] for _ in range(total_pages)]
     page_remarks: list[list[dict[str, Any]]] = [[] for _ in range(total_pages)]
+    classifications: list[str] = ["UNKNOWN"] * total_pages
+    # Per-page event set the moment classify+annotate stores its result.
+    classify_events: list[threading.Event] = [threading.Event() for _ in range(total_pages)]
+    _CLASSIFY_WAIT_TIMEOUT = 12.0  # seconds; upper bound for classify+annotate round-trip
+
+    def _classify_annotate_job(idx: int) -> tuple[int, dict[str, Any]]:
+        pno = idx + 1
+        try:
+            result = _classify_and_annotate_page(
+                api_key, grid_pages[idx], pno, total_pages, language
+            )
+            classifications[idx] = result["page_type"]
+            log.info(
+                "smart_ocr[%s] classify+annotate page=%s/%s type=%s anchors=%s remarks=%s",
+                request_id, pno, total_pages, result["page_type"],
+                len(result["anchor_marks"]), len(result["remarks"]),
+            )
+        except Exception as e:
+            log.warning("smart_ocr[%s] classify+annotate failed page=%s: %s", request_id, pno, e)
+            result = {"page_type": "UNKNOWN", "anchor_marks": [], "remarks": []}
+            classifications[idx] = "UNKNOWN"
+        finally:
+            classify_events[idx].set()
+        return idx, result
 
     def _ocr_job(idx: int) -> tuple[int, str]:
         pno = idx + 1
+        # Wait for classification so DUPLICATE pages can skip the OCR Gemini call.
+        classify_events[idx].wait(timeout=_CLASSIFY_WAIT_TIMEOUT)
         pt = classifications[idx]
+        if pt == "DUPLICATE" and idx > 0:
+            header = f"=== PAGE {pno} ==="
+            block = (
+                f"{header}\n[OMITTED: page classified DUPLICATE — duplicate of earlier sheet; "
+                f"OCR skipped to save tokens.]\n"
+            )
+            log.info("smart_ocr[%s] ocr page=%s DUPLICATE skipped", request_id, pno)
+            return idx, block
         block = _ocr_single_page(api_key, png_pages[idx], pno, total_pages, language, pt)
         log.info(
             "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
@@ -1191,33 +1403,20 @@ def smart_ocr_extract_student_answers(
         )
         return idx, block
 
-    def _annotation_job(idx: int) -> tuple[int, dict[str, Any]]:
-        pno = idx + 1
-        try:
-            result = _detect_page_annotations(api_key, grid_pages[idx], pno, total_pages)
-            log.info(
-                "smart_ocr[%s] annotate page=%s/%s anchors=%s remarks=%s",
-                request_id, pno, total_pages, len(result["anchor_marks"]), len(result["remarks"]),
-            )
-            return idx, result
-        except Exception as e:
-            log.warning("smart_ocr[%s] annotate failed page=%s: %s", request_id, pno, e)
-            return idx, {"anchor_marks": [], "remarks": []}
-
-    # Use 2× workers so OCR and annotation jobs for all pages can overlap.
+    # 2× workers: N classify+annotate + N OCR jobs all overlap in the same pool.
     with ThreadPoolExecutor(max_workers=max_workers * 2) as pool:
-        ocr_futs = [pool.submit(_ocr_job, i) for i in range(total_pages)]
-        ann_futs = [pool.submit(_annotation_job, i) for i in range(total_pages)]
-        for fut in as_completed(ocr_futs):
-            idx, block = fut.result()
-            page_blocks[idx] = block
-        for fut in as_completed(ann_futs):
+        cls_ann_futs = [pool.submit(_classify_annotate_job, i) for i in range(total_pages)]
+        ocr_futs     = [pool.submit(_ocr_job, i) for i in range(total_pages)]
+        for fut in as_completed(cls_ann_futs):
             idx, result = fut.result()
             anchors_pct, remarks_pct = _annotations_grid_to_pct(
                 result["anchor_marks"], result["remarks"], idx + 1
             )
             page_anchor_marks[idx] = anchors_pct
-            page_remarks[idx] = remarks_pct
+            page_remarks[idx] = _spread_remarks_two_column(remarks_pct, page_num=idx + 1)
+        for fut in as_completed(ocr_futs):
+            idx, block = fut.result()
+            page_blocks[idx] = block
 
     # Deduplicate near-identical neighboring pages (unchanged logic, uses text only).
     page_blocks = _deduplicate_page_texts(page_blocks, classifications, request_id)

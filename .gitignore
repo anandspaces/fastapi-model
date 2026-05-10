@@ -4,3 +4,5 @@ data/
 .venv/
 
 *.pdf
+
+docs/
