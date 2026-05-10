@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -47,7 +48,7 @@ _ANCHOR_MARK_SCHEMA = types.Schema(
     properties={
         "type": types.Schema(
             type=types.Type.STRING,
-            description="One of: circle, ellipse, underline, tick",
+            description="One of: ellipse, underline, tick",
         ),
         "cx": types.Schema(type=types.Type.NUMBER, description="Grid x center (1-50)"),
         "cy": types.Schema(type=types.Type.NUMBER, description="Grid y center (1-50)"),
@@ -126,6 +127,58 @@ _CLASSIFY_ANNOTATION_SCHEMA = types.Schema(
 )
 
 
+def _build_remark_comment_bank(language: str, page_type: str) -> str:
+    """Return a comment-bank block for injection into the classify+annotation prompt."""
+    lang = (language or "en").strip().lower()
+    if lang == "hi":
+        positive   = ["शुद्ध", "सही", "उत्तम", "बहुत अच्छा", "सटीक", "उचित", "संपूर्ण", "स्पष्ट"]
+        partial    = ["अपूर्ण", "और विस्तार करें", "संक्षिप्त", "उदाहरण दें", "स्पष्ट करें", "क्रम ठीक करें"]
+        negative   = ["गलत", "अशुद्ध", "सुधारें", "पुनः लिखें", "विलोम नहीं", "अर्थ गलत"]
+        structural = ["प्रश्न का उत्तर नहीं", "विषयांतर", "लेखन अस्पष्ट"]
+    else:
+        positive   = ["Correct", "Good", "Well done", "Precise", "Accurate", "Clear", "Complete", "Apt"]
+        partial    = ["Incomplete", "Elaborate", "Too brief", "Give example", "Clarify", "Revise order"]
+        negative   = ["Wrong", "Incorrect", "Revise", "Rewrite", "Not the antonym", "Meaning incorrect"]
+        structural = ["Off-topic", "Not answered", "Illegible"]
+
+    if page_type == "WORD_LIST":
+        strategy = ("For WORD_LIST: positive next to correct pairs, negative next to wrong pairs, "
+                    "partial when half-right.")
+    elif page_type == "CORRECTION":
+        strategy = ("For CORRECTION: positive/negative per numbered item; partial for incomplete fixes.")
+    else:
+        strategy = ("For PARAGRAPH: positive beside strong sentences, partial where elaboration needed, "
+                    "structural where student went off-topic.")
+
+    return "\n".join([
+        "COMMENT BANK — always pick the closest fit; do NOT output empty comments.",
+        f"  Positive  : {', '.join(repr(c) for c in positive)}",
+        f"  Partial   : {', '.join(repr(c) for c in partial)}",
+        f"  Negative  : {', '.join(repr(c) for c in negative)}",
+        f"  Structural: {', '.join(repr(c) for c in structural)}",
+        "",
+        strategy,
+        "If none fit, write a 1-3 word teacher note in the same language.",
+        'NEVER output comment="" — every remark box must have a meaningful comment.',
+    ])
+
+
+REMARK_COMMENT_BANKS: dict[str, dict[str, list[str]]] = {
+    "hi": {
+        "positive":   ["शुद्ध", "सही", "उत्तम", "बहुत अच्छा", "सटीक", "उचित", "संपूर्ण", "स्पष्ट", "सराहनीय"],
+        "partial":    ["अपूर्ण", "और विस्तार करें", "संक्षिप्त", "उदाहरण दें", "स्पष्ट करें", "क्रम ठीक करें"],
+        "negative":   ["गलत", "अशुद्ध", "सुधारें", "पुनः लिखें", "विलोम नहीं", "अर्थ गलत"],
+        "structural": ["प्रश्न का उत्तर नहीं", "विषयांतर", "लेखन अस्पष्ट"],
+    },
+    "en": {
+        "positive":   ["Correct", "Good", "Well done", "Precise", "Accurate", "Clear", "Complete", "Apt"],
+        "partial":    ["Incomplete", "Elaborate", "Too brief", "Give example", "Clarify", "Revise order"],
+        "negative":   ["Wrong", "Incorrect", "Revise", "Rewrite", "Not the antonym", "Meaning wrong"],
+        "structural": ["Off-topic", "Not answered", "Illegible"],
+    },
+}
+
+
 def _build_classify_annotation_prompt(page_num: int, total_pages: int, language: str) -> str:
     lang = (language or "en").strip().lower()
     script = (
@@ -133,60 +186,104 @@ def _build_classify_annotation_prompt(page_num: int, total_pages: int, language:
         if lang == "hi"
         else "English and/or Hindi may appear."
     )
-    return f"""You see page {page_num} of {total_pages} from a handwritten exam answer book.
-{script}
-A 50×50 reference grid is drawn on the image.
-  Columns 1–50: left edge → right (~2% natural margin at column 50).
-  Rows    1–50: top edge  → bottom (~2% natural margin at row 50).
+    comment_bank = _build_remark_comment_bank(language, "UNKNOWN")
 
+    return f"""You are simulating a human Hindi exam teacher marking a handwritten answer booklet.
+Page {page_num} of {total_pages}. {script}
+A 50×50 reference grid is drawn. Columns 1–50: left→right. Rows 1–50: top→bottom.
+
+════════════════════════════════════════════════════════
 STEP 1 — Classify the page. Choose exactly one page_type:
-- DUPLICATE  — layout visually identical to another sheet already in this booklet.
-- CORRECTION — mostly short sentence/line corrections, numbered one-line fixes.
-- PARAGRAPH  — long prose answers, paragraphs, अर्थ/प्रयोग style blocks.
-- WORD_LIST  — word pairs, विलोम, उपसर्ग/प्रत्यय tables, tabular lists.
-- UNKNOWN    — none of the above clearly fits.
+  DUPLICATE  — layout visually identical to another sheet already in this booklet.
+  CORRECTION — mostly short numbered sentence/line corrections.
+  PARAGRAPH  — long prose answers, अर्थ/प्रयोग style blocks.
+  WORD_LIST  — word pairs, विलोम, उपसर्ग/प्रत्यय tables.
+  UNKNOWN    — none of the above clearly fits.
 
-STEP 2 — If page_type is DUPLICATE, output exactly:
+If DUPLICATE → output exactly:
 {{"page_type":"DUPLICATE","content_bands":[],"anchor_marks":[],"remarks":[]}}
-and stop. Skip Steps 3, 4, and 5.
+and stop.
 
-STEP 3 — Map the page layout. Scan top-to-bottom using grid row numbers.
-Identify every contiguous band of rows containing STUDENT HANDWRITING.
-  • Focus on handwritten ink only — ignore pre-printed question text, ruled lines, boxes.
-  • The TOP MARGIN (rows 1–5) is always free — never list it as content.
-  • The BOTTOM MARGIN (rows 46–50) is always free — never list it as content.
-  • The RIGHT MARGIN strip (columns 38–50) is structurally free throughout — content stays in columns 1–37.
-Record each handwriting band: {{"y1": first_row_with_ink, "y2": last_row_with_ink}}.
-Example — writing rows 8–22, blank gap, then writing rows 28–43:
+════════════════════════════════════════════════════════
+STEP 2 — Map handwriting bands (rows 6–45 only).
+Identify every contiguous band of STUDENT HANDWRITING rows.
+  • Ignore printed question text, ruled lines, boxes.
+  • Rows 1–8 are top margin (printed header/roll box) — never list as content.
+  • Rows 46–50 are bottom margin — never list as content.
+  • Columns 38–50 are always the right margin — content stays in columns 1–37.
+Record each band: {{"y1": first_row_with_ink, "y2": last_row_with_ink}}
+  Example: writing rows 8–22, gap, then rows 28–43:
   content_bands: [{{"y1":8,"y2":22}},{{"y1":28,"y2":43}}]
-FREE ZONES this creates:
-  • Right margin  : columns 38–49, rows 6–45 (always available)
-  • Horizontal gaps: y-ranges NOT covered by any content band, within rows 6–45
+IMPORTANT: The last band's y2 MUST reach the final handwriting row including
+conclusion paragraphs in the lower half. Scan rows 30–45 explicitly.
 
-STEP 4 — Suggest anchor mark positions (3–5) for teacher markup on the student's handwriting.
-These are NOT existing marks — recommend where a teacher should annotate:
-   • "underline" : under a key term or phrase the student wrote. cx/cy = text centre, rx = half span, ry = 0.
-   • "circle"    : around a key number, date, or fact. rx ≈ 1–2 grid units.
-   • "ellipse"   : over a key multi-word phrase. rx = half span, ry ≈ 1–2.
-   • "tick"      : beside a correct bullet point or numbered item. rx = 0, ry = 0.
-   Use grid numbers in the image to pinpoint each spot precisely.
+════════════════════════════════════════════════════════
+STEP 3 — Place ANCHOR MARKS (4–7) exactly as a human teacher would.
 
-STEP 5 — Place remark boxes (2–4) using ONLY the FREE ZONES from STEP 3.
-   DISTRIBUTION: spread them across the full vertical height — place one in the top third,
-   one in the middle third, and one or two in the bottom third of the content zone.
-   Do NOT cluster all boxes near the top.
-   RULES (non-negotiable):
-   1. PREFER right margin first: x1 ≥ 38, x2 ≤ 49, y1 ≥ 6, y2 ≤ 45.
-   2. Use a horizontal gap ONLY when no right-margin space is available.
-      A gap is valid only if the ENTIRE span [y1, y2] falls OUTSIDE all content_bands.
-   3. NEVER let a remark overlap any content_band. If band {{"y1":8,"y2":22}} exists,
-      a remark with y1=15 would overlap — forbidden unless x1 ≥ 38.
-   4. NEVER place where y1 < 6 or y2 > 45 (fixed top/bottom margins).
-   5. x2 > x1 always. y2 > y1 always. Width ≥ 5 units. Height ≥ 3 units.
-   6. comment = "" always.
-   Right-margin example: {{"x1":39,"y1":10,"x2":49,"y2":22,"comment":""}}
-   Gap example (only if gap exists between band end and next band start):
-     {{"x1":5,"y1":23,"x2":37,"y2":27,"comment":""}}
+A real teacher marks differently depending on what is written:
+
+  ── TICK (✓) — Place next to each CORRECT student point or pair ──────────
+  • cx must be in columns 5–8 (left edge, beside numbered items) OR
+    immediately after the last character of the answer line (cx ~ end of text).
+  • For WORD_LIST: one tick per correct word-pair row, at the row's baseline.
+  • For CORRECTION: one tick per correct numbered sentence, at line baseline.
+  • For PARAGRAPH: tick beside a strong concluding sentence.
+  • If no answer is clearly correct, emit ZERO ticks — never fake a tick.
+  • cx ∈ [5, 8] for left-margin ticks. rx = 0, ry = 0.
+
+  ── UNDERLINE — Mark key terms the student correctly wrote ───────────────
+  • Underline under a key vocabulary word or concept correctly used.
+  • For CORRECTION: underline the corrected verb/noun form (the fix itself).
+  • For PARAGRAPH: underline 2–3 key terms dispersed across the answer body.
+  • cy = BOTTOM EDGE of the word's ink (baseline row), not its vertical centre.
+  • rx = half-width of the underlined phrase. cx ∈ [8, 34].
+  • (cx − rx) ≥ 6 and (cx + rx) ≤ 36.
+
+  ── ELLIPSE — Highlight a multi-word phrase (2–4 words) ──────────────────
+  • Use for a short correct phrase (not a single word, not a whole sentence).
+  • ry ≤ 1 grid unit (tight horizontal oval). cx ∈ [8, 34].
+
+  PAGE-TYPE STRATEGY:
+  • WORD_LIST   → prefer ticks + ellipses (correct vs wrong pairs); minimal underlines
+  • CORRECTION  → prefer ticks on correct lines + ellipses on wrong words + underlines on corrections
+  • PARAGRAPH   → prefer underlines + ellipses on key ideas; ticks only on strong conclusions
+  • UNKNOWN     → 2 underlines + 1 ellipse minimum
+
+  MANDATORY RULES:
+  • cx for ALL marks must be 8–34 EXCEPT left-margin ticks which use cx 5–8.
+  • For underlines: cy is the BOTTOM of the word's ink, not the row centre.
+  • NEVER place marks on printed question text, headers, or blank rows.
+  • First mark must be ≥ row 13 (or wherever student handwriting starts).
+
+════════════════════════════════════════════════════════
+STEP 4 — Place REMARK BOXES (3–5) with real teacher comments.
+
+{comment_bank}
+
+PLACEMENT LOGIC (human teacher behaviour):
+  1. Each remark box must be NEAR the text it comments on — same y region.
+  2. Alternate sides: odd remarks in RIGHT margin, even remarks in LEFT margin.
+     (Or use inline gap remarks where there is a clear horizontal blank gap.)
+  3. RIGHT margin zone : x1 ≥ 38, x2 ≤ 49, y1 ≥ 9, y2 ≤ 45. Always free.
+  4. LEFT margin zone  : x1 ≥ 1,  x2 ≤ 12, y1 ≥ 9, y2 ≤ 45. Always free.
+  5. INLINE GAP remark : x1=5, x2=37; ONLY inside a horizontal gap outside all content_bands.
+     Must span the ENTIRE gap (expand to fill all free rows of the gap).
+  6. NEVER overlap a content_band unless it is in the right or left margin zone.
+  7. NEVER y1 < 9 or y2 > 45. x2 > x1. y2 > y1. Width ≥ 5. Height ≥ 3.
+
+  REMARK DISTRIBUTION across the page:
+  • Top third of answer    → RIGHT margin
+  • Middle of answer       → LEFT margin (or inline gap if one exists)
+  • Lower middle           → RIGHT margin
+  • Bottom of answer       → LEFT margin
+
+  REMARK CONTENT rules:
+  • Pick the single most fitting comment from the COMMENT BANK above.
+  • Keep comments ≤ 4 words (they must fit in a small margin box).
+  • Match the comment to the SPECIFIC text at that y-position on the page.
+  • Right-margin example : {{"x1":39,"y1":10,"x2":49,"y2":14,"comment":"सही"}}
+  • Left-margin example  : {{"x1":2, "y1":20,"x2":12,"y2":24,"comment":"Incomplete"}}
+  • Inline-gap example   : {{"x1":5, "y1":22,"x2":37,"y2":28,"comment":"अपूर्ण"}}
 
 All coordinates: integers in [1, 50]."""
 
@@ -207,6 +304,115 @@ def _parse_content_bands(raw_bands: Any) -> list[dict[str, float]]:
         except (TypeError, ValueError):
             pass
     return bands
+
+
+def _merge_content_bands(
+    bands: list[dict[str, float]], gap_threshold: float = 4.0
+) -> list[dict[str, float]]:
+    """Merge consecutive bands separated by ≤ gap_threshold grid rows.
+
+    Eliminates over-segmentation caused by inter-line whitespace within a
+    single paragraph being detected as separate bands.
+    """
+    if not bands:
+        return bands
+    sorted_b = sorted(bands, key=lambda b: b["y1"])
+    merged = [dict(sorted_b[0])]
+    for b in sorted_b[1:]:
+        if b["y1"] - merged[-1]["y2"] <= gap_threshold:
+            merged[-1]["y2"] = max(merged[-1]["y2"], b["y2"])
+        else:
+            merged.append(dict(b))
+    return merged
+
+
+def _extend_last_band(
+    bands: list[dict[str, float]],
+    anchor_cys_grid: list[float],
+    page_type: str,
+) -> list[dict[str, float]]:
+    """Extend the last content band to cover text below the final anchor mark.
+
+    PARAGRAPH and CORRECTION pages often have a conclusion paragraph that Gemini
+    stops short of. Extends to max(last_y2, max_anchor_cy) + 7, capped at grid 44.
+    """
+    if not bands or page_type not in ("PARAGRAPH", "CORRECTION"):
+        return bands
+    bands = [dict(b) for b in bands]
+    last = bands[-1]
+    max_anchor = max(anchor_cys_grid, default=last["y2"])
+    new_y2 = min(44.0, max(last["y2"], max_anchor) + 7.0)
+    if new_y2 > last["y2"]:
+        log.info(
+            "  extend_last_band  y2 %.0f → %.0f  (max_anchor=%.1f type=%s)",
+            last["y2"], new_y2, max_anchor, page_type,
+        )
+        last["y2"] = new_y2
+    return bands
+
+
+def _remarks_from_anchor_marks(
+    anchor_marks_grid: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Derive right-margin remark slots from anchor mark y-positions.
+
+    Clusters anchor marks within _ANCHOR_CLUSTER_GAP_GRID rows and places one
+    slot per cluster at the cluster centroid. Every remark is vertically aligned
+    with something the teacher actually annotated.
+
+    Fallback: 3 evenly spaced slots when no anchor marks are present.
+    """
+    if not anchor_marks_grid:
+        return [
+            {"x1": 39.0, "y1": 10.0, "x2": 49.0, "y2": 14.0, "comment": "",
+             "_text_y1_grid": 10.0, "_text_y2_grid": 14.0, "_cluster_size": 0},
+            {"x1": 39.0, "y1": 24.0, "x2": 49.0, "y2": 28.0, "comment": "",
+             "_text_y1_grid": 24.0, "_text_y2_grid": 28.0, "_cluster_size": 0},
+            {"x1": 39.0, "y1": 38.0, "x2": 49.0, "y2": 42.0, "comment": "",
+             "_text_y1_grid": 38.0, "_text_y2_grid": 42.0, "_cluster_size": 0},
+        ]
+
+    cys = sorted(float(a.get("cy", 25)) for a in anchor_marks_grid)
+
+    clusters: list[list[float]] = []
+    for cy in cys:
+        if clusters and cy - clusters[-1][-1] <= _ANCHOR_CLUSTER_GAP_GRID:
+            clusters[-1].append(cy)
+        else:
+            clusters.append([cy])
+
+    slots: list[dict[str, Any]] = []
+    for cluster in clusters:
+        cy = sum(cluster) / len(cluster)
+        y1 = max(6.0, cy - 2.0)
+        y2 = min(45.0, y1 + 4.0)
+        slots.append({
+            "x1": 39.0, "y1": y1, "x2": 49.0, "y2": y2, "comment": "",
+            "_text_y1_grid": min(cluster),
+            "_text_y2_grid": max(cluster),
+            "_cluster_size": len(cluster),
+        })
+
+    # Ensure at least 3 remark slots so every page gets a minimum of 3 remarks.
+    _MIN_SLOTS = 3
+    if len(slots) < _MIN_SLOTS:
+        occupied = {round(s["y1"]) for s in slots}
+        candidates = [10.0, 20.0, 30.0, 38.0, 14.0, 26.0]
+        for cy in candidates:
+            if len(slots) >= _MIN_SLOTS:
+                break
+            y1 = max(6.0, cy - 2.0)
+            if round(y1) in occupied:
+                continue
+            y2 = min(45.0, y1 + 4.0)
+            slots.append({
+                "x1": 39.0, "y1": y1, "x2": 49.0, "y2": y2, "comment": "",
+                "_text_y1_grid": y1, "_text_y2_grid": y2, "_cluster_size": 0,
+            })
+            occupied.add(round(y1))
+        slots.sort(key=lambda s: s["y1"])
+
+    return slots
 
 
 def _filter_overlapping_remarks(
@@ -258,23 +464,67 @@ _REM_RIGHT_X1 = 76.0   # right margin left edge  (~grid 39 → pct)
 _REM_RIGHT_X2 = 96.0   # right margin right edge (~grid 49 → pct)
 _REM_LEFT_X1  =  2.0   # left margin left edge   (~grid 2  → pct)
 _REM_LEFT_X2  = 20.0   # left margin right edge  (~grid 11 → pct)
-_REM_Y_MIN    =  8.0   # top guard (% from top)
-_REM_Y_MAX    = 90.0   # bottom guard (% from top)
+_REM_Y_MIN    = 16.0   # top guard: keep remarks below the printed header (~grid row 9)
+_REM_Y_MAX    = 94.0   # bottom guard (% from top) — margin remarks can reach near page bottom
 _REM_MIN_H    =  4.0   # minimum remark box height in %
+_ANCHOR_CLUSTER_GAP_GRID = 3   # anchor marks within 3 grid rows → one remark slot
+_CONTENT_X_MIN = 5.0   # leftmost grid column of student answer area
+_CONTENT_X_MAX = 37.0  # rightmost grid column of student answer area (38+ is right margin)
+
+# --- Font-aware remark height constants ---
+_FONT_SIZE_PT          = 14.0   # rendering font size in points
+_LINE_HEIGHT_FACTOR    = 1.25   # line height = font_size × factor
+_BOX_PADDING_PT        =  4.0   # top+bottom padding inside the remark box (pt)
+_AVG_CHAR_WIDTH_FACTOR = 0.55   # avg char width = font_size × factor
+_PAGE_HEIGHT_PT        = 842.0  # A4 page height (pt)
+_PAGE_WIDTH_PT         = 595.0  # A4 page width (pt)
+_INTER_REMARK_GAP_PCT  =  1.5   # minimum clear gap between consecutive remarks (%)
+
+
+def _remark_height_pct(comment: str, col_x1_pct: float, col_x2_pct: float) -> float:
+    """Compute the remark box height (%) needed to fit `comment` at _FONT_SIZE_PT.
+
+    Uses A4 dimensions, the column's percentage width, and char-wrap arithmetic.
+    Always returns at least _REM_MIN_H.
+    """
+    col_width_pt   = (col_x2_pct - col_x1_pct) / 100.0 * _PAGE_WIDTH_PT
+    usable_pt      = max(20.0, col_width_pt - _BOX_PADDING_PT)
+    chars_per_line = max(8, int(usable_pt / (_FONT_SIZE_PT * _AVG_CHAR_WIDTH_FACTOR)))
+    n_lines        = math.ceil(len(comment) / chars_per_line) if comment else 1
+    h_pt           = n_lines * _FONT_SIZE_PT * _LINE_HEIGHT_FACTOR + _BOX_PADDING_PT
+    return max(_REM_MIN_H, h_pt / _PAGE_HEIGHT_PT * 100.0)
+
+
+def _first_free_slot(
+    placed: list[tuple[float, float]], ideal_y1: float, height: float
+) -> float | None:
+    """Return the first y1 ≥ ideal_y1 where [y1, y1+height] doesn't overlap any placed interval.
+
+    Scans placed intervals (sorted) and jumps past each conflict until a free gap is
+    found or _REM_Y_MAX is exceeded. Returns None when no slot fits.
+    """
+    y1 = ideal_y1
+    for _ in range(20):
+        y2 = y1 + height
+        if y2 > _REM_Y_MAX:
+            return None
+        conflict = next((p for p in placed if p[0] < y2 and p[1] > y1), None)
+        if conflict is None:
+            return y1
+        y1 = conflict[1]
+    return None
 
 
 def _spread_remarks_two_column(
     remarks_pct: list[dict[str, Any]],
     page_num: int = 0,
 ) -> list[dict[str, Any]]:
-    """Re-layout a single page's remarks into right + left margin with no overlaps.
+    """Re-layout a page's remarks into right + left margin with no overlaps.
 
-    Right margin (x1~76%) is always tried first. When a remark's ideal y position
-    is already occupied by the previous right-column remark, the new remark is placed
-    in the left margin (x1~2%) at its ideal y — creating natural left/right alternation
-    for dense pages while keeping sparse pages entirely in the right margin.
-    When both columns need vertical push-down, the one needing less movement wins.
-    Remarks that overflow past _REM_Y_MAX in both columns are dropped silently.
+    Uses interval-based free-slot search: each remark independently finds the first
+    non-overlapping slot in right and left columns, then places on whichever side is
+    closer to its ideal y. True bidirectional — naturally alternates when one side is
+    densely packed. Remarks that can't fit in either column are dropped silently.
     """
     if not remarks_pct:
         return []
@@ -282,8 +532,7 @@ def _spread_remarks_two_column(
     sorted_r = sorted(remarks_pct, key=lambda r: r.get("y1_pct", 0.0))
 
     log.info(
-        "spread[p%s] input  %s",
-        page_num,
+        "spread[p%s] input  %s", page_num,
         " ".join(
             f"x[{r.get('x1_pct',0):.0f}-{r.get('x2_pct',0):.0f}]"
             f"y[{r.get('y1_pct',0):.0f}-{r.get('y2_pct',0):.0f}]"
@@ -291,63 +540,103 @@ def _spread_remarks_two_column(
         ),
     )
 
-    right_top = _REM_Y_MIN   # next free y in right column
-    left_top  = _REM_Y_MIN   # next free y in left column
+    right_placed: list[tuple[float, float]] = []
+    left_placed:  list[tuple[float, float]] = []
     result: list[dict[str, Any]] = []
 
     for orig in sorted_r:
-        r = dict(orig)
-        h = max(r.get("y2_pct", 0.0) - r.get("y1_pct", 0.0), _REM_MIN_H)
-        ideal = max(_REM_Y_MIN, r.get("y1_pct", _REM_Y_MIN))
+        r       = dict(orig)
+        comment = r.get("comment", "") or ""
+        h_right = _remark_height_pct(comment, _REM_RIGHT_X1, _REM_RIGHT_X2)
+        h_left  = _remark_height_pct(comment, _REM_LEFT_X1,  _REM_LEFT_X2)
+        ideal   = max(_REM_Y_MIN, r.get("y1_pct", _REM_Y_MIN))
 
-        ry1 = max(ideal, right_top)
-        ry2 = ry1 + h
-        ly1 = max(ideal, left_top)
-        ly2 = ly1 + h
+        ry1 = _first_free_slot(right_placed, ideal, h_right)
+        ly1 = _first_free_slot(left_placed,  ideal, h_left)
 
-        right_fits = ry2 <= _REM_Y_MAX
-        left_fits  = ly2 <= _REM_Y_MAX
+        right_fits = ry1 is not None
+        left_fits  = ly1 is not None
+
+        # Fallback: when forward scan overflows, try bottom-clamped position in each column.
+        # This avoids dropping remarks that can still fit anchored to the column's bottom.
+        if not right_fits:
+            bc = _REM_Y_MAX - h_right
+            if bc >= _REM_Y_MIN and not any(p[0] < _REM_Y_MAX and p[1] > bc for p in right_placed):
+                ry1 = bc
+                right_fits = True
+                log.info("  spread[p%s] R_bottom_clamp ideal_y=%.0f → y1=%.0f", page_num, ideal, bc)
+
+        if not left_fits:
+            bc = _REM_Y_MAX - h_left
+            if bc >= _REM_Y_MIN and not any(p[0] < _REM_Y_MAX and p[1] > bc for p in left_placed):
+                ly1 = bc
+                left_fits = True
+                log.info("  spread[p%s] L_bottom_clamp ideal_y=%.0f → y1=%.0f", page_num, ideal, bc)
 
         if not right_fits and not left_fits:
-            log.info(
-                "  spread[p%s] DROP  no_space ideal_y=%.0f right_top=%.0f left_top=%.0f",
-                page_num, ideal, right_top, left_top,
-            )
-            continue   # page is full — drop
+            log.info("  spread[p%s] DROP  truly_no_space ideal_y=%.0f", page_num, ideal)
+            continue
 
-        # Prefer right; switch to left when left starts closer to the ideal y.
+        # Pick whichever side's free slot starts closer to ideal y.
+        # When equal or right is nearer, prefer right.
         if right_fits and (not left_fits or ry1 <= ly1):
             col = "R"
+            y1, y2 = ry1, ry1 + h_right
+            right_placed.append((y1, y2 + _INTER_REMARK_GAP_PCT))
+            right_placed.sort()
             r.update({"x1_pct": _REM_RIGHT_X1, "x2_pct": _REM_RIGHT_X2,
-                       "y1_pct": round(ry1, 2), "y2_pct": round(ry2, 2)})
-            right_top = ry2
+                       "y1_pct": round(y1, 2), "y2_pct": round(y2, 2)})
         else:
             col = "L"
+            y1, y2 = ly1, ly1 + h_left
+            left_placed.append((y1, y2 + _INTER_REMARK_GAP_PCT))
+            left_placed.sort()
             r.update({"x1_pct": _REM_LEFT_X1, "x2_pct": _REM_LEFT_X2,
-                       "y1_pct": round(ly1, 2), "y2_pct": round(ly2, 2)})
-            left_top = ly2
+                       "y1_pct": round(y1, 2), "y2_pct": round(y2, 2)})
 
         log.info(
-            "  spread[p%s] %s  ideal_y=%.0f → y[%.0f-%.0f]  push=%.0fpx",
-            page_num, col, ideal, r["y1_pct"], r["y2_pct"], r["y1_pct"] - ideal,
+            "  spread[p%s] %s  ideal_y=%.0f → y[%.0f-%.0f](h=%.1f)  push=%.0f  comment_len=%s",
+            page_num, col, ideal, y1, y2,
+            h_right if col == "R" else h_left,
+            y1 - ideal, len(comment),
         )
         result.append(r)
 
     log.info(
-        "spread[p%s] output R=%s L=%s",
-        page_num,
-        " ".join(f"y[{r['y1_pct']:.0f}-{r['y2_pct']:.0f}]" for r in result if r["x1_pct"] >= 50),
-        " ".join(f"y[{r['y1_pct']:.0f}-{r['y2_pct']:.0f}]" for r in result if r["x1_pct"] < 50),
+        "spread[p%s] output R=%s L=%s", page_num,
+        " ".join(f"y[{y1:.0f}-{y2:.0f}]" for y1, y2 in right_placed),
+        " ".join(f"y[{y1:.0f}-{y2:.0f}]" for y1, y2 in left_placed),
     )
     return result
+
+
+def _recalc_connector(r: dict[str, Any]) -> None:
+    """Recompute connector fields after spread may have changed the remark's column."""
+    x1 = float(r.get("x1_pct", 76.0))
+    x2 = float(r.get("x2_pct", 96.0))
+    if x2 < 74.0:
+        r["connector_type"] = "none"
+        r.pop("connector_cy_pct", None)
+        return
+    text_y1 = float(r.get("text_y1_pct", 0.0))
+    text_y2 = float(r.get("text_y2_pct", 0.0))
+    span = text_y2 - text_y1
+    if span >= 4.0:
+        r["connector_type"] = "brace"
+        r.pop("connector_cy_pct", None)
+    else:
+        r["connector_type"] = "arrow"
+        r["connector_cy_pct"] = round((text_y1 + text_y2) / 2.0, 2)
+    r["connector_x_pct"] = 73.0 if x1 >= 70.0 else 23.0
 
 
 def _deoverlap_item_remarks(remarks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Re-spread all remarks for one item after enrichment to eliminate any new overlaps.
 
     Groups by page, then runs _spread_remarks_two_column on each page's complete
-    remark set. Guarantees no remark-to-remark overlap in the final output,
-    even when enrich_remarks_from_annotations appended fallback boxes.
+    remark set. Inline gap remarks (x2_pct < 74%) bypass spread — they already have a
+    precise full-width placement inside a handwriting gap. After spread, every remark's
+    connector fields are recalculated to match the final column assignment.
     """
     by_page: dict[int, list[dict[str, Any]]] = {}
     for r in remarks:
@@ -356,7 +645,13 @@ def _deoverlap_item_remarks(remarks: list[dict[str, Any]]) -> list[dict[str, Any
 
     result: list[dict[str, Any]] = []
     for pg in sorted(by_page.keys()):
-        result.extend(_spread_remarks_two_column(by_page[pg], page_num=pg))
+        inline = [r for r in by_page[pg] if float(r.get("x2_pct", 96)) < 74.0]
+        margin = [r for r in by_page[pg] if float(r.get("x2_pct", 96)) >= 74.0]
+        spread = _spread_remarks_two_column(margin, page_num=pg)
+        for r in spread:
+            _recalc_connector(r)
+        result.extend(spread)
+        result.extend(inline)
     return result
 
 
@@ -372,7 +667,24 @@ def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, An
             continue
         if isinstance(data, dict) and data.get("page_type") is not None:
             page_type = _coerce_page_type(str(data["page_type"]))
+            raw_anchor_cys = [
+                float(a.get("cy", 25))
+                for a in data.get("anchor_marks", [])
+                if isinstance(a, dict)
+            ]
             content_bands = _parse_content_bands(data.get("content_bands", []))
+            content_bands = _merge_content_bands(content_bands)
+            content_bands = _extend_last_band(content_bands, raw_anchor_cys, page_type)
+
+            # Drop circles/ellipses that sit in blank inter-paragraph gaps (not around any word).
+            if content_bands:
+                def _cy_in_band(cy_g: float) -> bool:
+                    return any(b["y1"] <= cy_g <= b["y2"] for b in content_bands)
+                base["anchor_marks"] = [
+                    a for a in base["anchor_marks"]
+                    if a["type"] != "ellipse" or _cy_in_band(float(a.get("cy", 25)))
+                ]
+
             break
 
     # ── Diagnostic: layout analysis ──────────────────────────────────────────
@@ -387,7 +699,6 @@ def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, An
         free_zones.append(f"gap[{prev:.0f}-45]")
     free_zones.insert(0, "right_margin[38-49,y6-45]")  # always available
 
-    raw_remarks = base.get("remarks", [])
     log.info(
         "layout[p%s] type=%-10s bands=%s",
         page_num, page_type,
@@ -397,20 +708,37 @@ def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, An
         "layout[p%s] free_zones=%s",
         page_num, " ".join(free_zones),
     )
-    log.info(
-        "layout[p%s] remarks_from_ai=%s",
-        page_num,
-        " ".join(
-            f"x[{r.get('x1',0):.0f}-{r.get('x2',0):.0f}]y[{r.get('y1',0):.0f}-{r.get('y2',0):.0f}]"
-            for r in raw_remarks
-        ) or "(none)",
-    )
     # ─────────────────────────────────────────────────────────────────────────
 
     if page_type == "DUPLICATE":
         return {"page_type": "DUPLICATE", "anchor_marks": [], "remarks": []}
-    # Server-side safety: remove any remarks that landed on content zones.
-    base["remarks"] = _filter_overlapping_remarks(base["remarks"], content_bands, page_num)
+
+    # Margin remark slots: derived from anchor-mark clusters (reliable positioning).
+    derived = _remarks_from_anchor_marks(base["anchor_marks"])
+    log.info(
+        "layout[p%s] remarks_derived=%s",
+        page_num,
+        " ".join(
+            f"y[{r.get('y1',0):.0f}-{r.get('y2',0):.0f}]" for r in derived
+        ) or "(none)",
+    )
+
+    # Inline gap remarks: taken from Gemini's STEP 5 output (x1 < 38 = content-area x).
+    # Margin suggestions (x1 >= 38) are ignored in favour of derived slots above.
+    inline_gaps = [
+        r for r in base["remarks"]
+        if float(r.get("x1", 50)) < 38
+    ]
+    if inline_gaps:
+        log.info(
+            "layout[p%s] inline_gaps=%s",
+            page_num,
+            " ".join(f"x[{r.get('x1',0):.0f}-{r.get('x2',0):.0f}]y[{r.get('y1',0):.0f}-{r.get('y2',0):.0f}]"
+                     for r in inline_gaps),
+        )
+
+    all_remarks = derived + inline_gaps
+    base["remarks"] = _filter_overlapping_remarks(all_remarks, content_bands, page_num)
     return {"page_type": page_type, **base}
 
 
@@ -473,16 +801,24 @@ def _parse_annotation_response(raw: str, page_num: int) -> dict[str, Any]:
             if not isinstance(a, dict):
                 continue
             t = str(a.get("type", "")).strip().lower()
-            if t not in ("circle", "ellipse", "underline", "tick"):
+            if t not in ("ellipse", "underline", "tick"):
                 continue
             try:
-                anchor_marks.append({
-                    "type": t,
-                    "cx": float(a.get("cx", 25)),
-                    "cy": float(a.get("cy", 25)),
-                    "rx": float(a.get("rx", 2)),
-                    "ry": float(a.get("ry", 2)),
-                })
+                cx = float(a.get("cx", 25))
+                cy = float(a.get("cy", 25))
+                rx = float(a.get("rx", 2))
+                ry = float(a.get("ry", 2))
+                # Clamp anchor marks to the answer content columns [_CONTENT_X_MIN, _CONTENT_X_MAX]
+                if t == "underline":
+                    ry = 0.0
+                    rx = min(rx, cx - _CONTENT_X_MIN, _CONTENT_X_MAX - cx)
+                    rx = max(0.5, rx)
+                    cx = max(_CONTENT_X_MIN + rx, min(_CONTENT_X_MAX - rx, cx))
+                elif t in ("circle", "ellipse"):
+                    cx = max(_CONTENT_X_MIN + rx, min(_CONTENT_X_MAX - rx, cx))
+                else:  # tick
+                    cx = max(_CONTENT_X_MIN, min(_CONTENT_X_MAX, cx))
+                anchor_marks.append({"type": t, "cx": cx, "cy": cy, "rx": rx, "ry": ry})
             except (TypeError, ValueError):
                 pass
 
@@ -798,7 +1134,6 @@ def _normalize_flat_item(
     end_page = _page_num(item.get("end_page"), total_pages, start_page)
     if end_page < start_page:
         end_page = start_page
-    marking_page = _page_num(item.get("marking_page"), total_pages, start_page)
 
     question_text = str(item.get("question", "")).strip()
     label_num = _extract_question_number(question_text)
@@ -816,7 +1151,11 @@ def _normalize_flat_item(
     ans = str(item.get("student_answer", "")).strip()
     start_sy = _clamp_pct(item.get("start_y_position_percent", 0))
     end_sy = _clamp_pct(item.get("end_y_position_percent", 100))
-    my = _clamp_pct(item.get("marking_y_position_percent", 50))
+
+    # Score mark always on the start page at the y where the answer begins.
+    # Ignore Gemini's marking_page to avoid cross-page y-mismatch.
+    marking_page = start_page
+    my = start_sy
 
     return {
         "question_id": qid,
@@ -830,7 +1169,7 @@ def _normalize_flat_item(
         "end_page": end_page,
         "end_y_position_percent": end_sy,
         "marking_page": marking_page,
-        "marking_x_position_percent": _clamp_pct(item.get("marking_x_position_percent", 50)),
+        "marking_x_position_percent": 85.0,  # always right margin (center of 76–96% band)
         "marking_y_position_percent": my,
     }
 
@@ -1035,14 +1374,45 @@ def _annotations_grid_to_pct(
     for r in remarks:
         x1_pct, y1_pct = grid_to_pct(r["x1"], r["y1"])
         x2_pct, y2_pct = grid_to_pct(r["x2"], r["y2"])
-        out_remarks.append({
+
+        # Text span: stored in grid coords by _remarks_from_anchor_marks
+        tg1 = r.get("_text_y1_grid", r["y1"])
+        tg2 = r.get("_text_y2_grid", r["y2"])
+        _, text_y1_pct = grid_to_pct(1, tg1)
+        _, text_y2_pct = grid_to_pct(1, tg2)
+        cluster_size = r.get("_cluster_size", 0)
+        span_pct = text_y2_pct - text_y1_pct
+
+        # Inline gap remark spans the content area (not a margin) — no connector needed.
+        is_inline = x2_pct < 74.0
+        conn_cy: float | None = None
+        if is_inline:
+            conn_type = "none"
+            is_right = False
+        elif cluster_size >= 2 or span_pct >= 4.0:
+            conn_type = "brace"
+            is_right = x1_pct >= 70.0
+        else:
+            conn_type = "arrow"
+            conn_cy = round((text_y1_pct + text_y2_pct) / 2.0, 2)
+            is_right = x1_pct >= 70.0
+        conn_x = 73.0 if is_right else 23.0
+
+        rem_out: dict[str, Any] = {
             "page": page,
             "x1_pct": round(x1_pct, 2),
             "y1_pct": round(y1_pct, 2),
             "x2_pct": round(x2_pct, 2),
             "y2_pct": round(y2_pct, 2),
             "comment": r.get("comment", ""),
-        })
+            "text_y1_pct": round(text_y1_pct, 2),
+            "text_y2_pct": round(text_y2_pct, 2),
+            "connector_type": conn_type,
+            "connector_x_pct": conn_x,
+        }
+        if conn_cy is not None:
+            rem_out["connector_cy_pct"] = conn_cy
+        out_remarks.append(rem_out)
 
     return out_anchors, out_remarks
 
@@ -1254,18 +1624,26 @@ def enrich_remarks_from_annotations(items: list[dict[str, Any]]) -> None:
     a visual position (page_index 0-based, y_position_percent). This function:
 
     1. Matches every annotation to the nearest unmatched remark box on the same page
-       (by y-centre distance).  If the best match is within 35 percentage points, the
+       (by y-centre distance).  If the best match is within 20 percentage points, the
        remark's comment is set from the annotation.
     2. Annotations that find no close-enough remark box get a **new remark entry**
-       built from the annotation's own coords.
+       built from the annotation's own coords, clamped to the item's answer-body zone
+       so injected remarks never land on the printed question-text area.
 
     Mutates items in-place; returns None.
     """
+    _GUARD = 8.0  # % to skip past printed question-text zone from start_y
+
     for item in items:
         remarks: list[dict[str, Any]] = item.get("remarks") or []
         annotations: list[dict[str, Any]] = item.get("annotations") or []
         if not annotations:
             continue
+
+        item_start_page = int(item.get("start_page", 1))
+        item_end_page   = int(item.get("end_page", item_start_page))
+        item_sy         = float(item.get("start_y_position_percent", 0.0))
+        item_ey         = float(item.get("end_y_position_percent", 100.0))
 
         matched_remark_indices: set[int] = set()
 
@@ -1296,10 +1674,37 @@ def enrich_remarks_from_annotations(items: list[dict[str, Any]]) -> None:
                 matched_remark_indices.add(best_idx)
             else:
                 # No nearby remark box — create one in the right margin.
-                # Never use annotation x-coords: those span the answer area (10-90%).
+                # Determine the effective answer-body y-range for this page so the
+                # injected remark never lands on the printed question-text zone.
+                if target_page == item_start_page == item_end_page:
+                    body_y_min = item_sy + _GUARD
+                    body_y_max = item_ey
+                elif target_page == item_start_page:
+                    body_y_min = item_sy + _GUARD
+                    body_y_max = 100.0
+                elif target_page == item_end_page:
+                    body_y_min = _REM_Y_MIN
+                    body_y_max = item_ey
+                else:
+                    body_y_min = _REM_Y_MIN
+                    body_y_max = _REM_Y_MAX
+
+                if body_y_min >= body_y_max:
+                    log.info(
+                        "enrich_remarks: skip ann y=%.0f page=%s — no body room",
+                        ann_y, target_page,
+                    )
+                    continue
+
+                ann_y_clamped = max(body_y_min, min(body_y_max, ann_y))
+                log.info(
+                    "enrich_remarks: new remark ann_y=%.0f → clamped=%.0f page=%s body[%.0f-%.0f]",
+                    ann_y, ann_y_clamped, target_page, body_y_min, body_y_max,
+                )
+
                 try:
-                    y1 = max(_REM_Y_MIN, ann_y - 5.0)
-                    y2 = min(_REM_Y_MAX, ann_y + 5.0)
+                    y1 = max(_REM_Y_MIN, ann_y_clamped - 5.0)
+                    y2 = min(_REM_Y_MAX, ann_y_clamped + 5.0)
                     if y2 - y1 < _REM_MIN_H:
                         y2 = min(_REM_Y_MAX, y1 + _REM_MIN_H)
                     remarks.append({
@@ -1309,6 +1714,11 @@ def enrich_remarks_from_annotations(items: list[dict[str, Any]]) -> None:
                         "x2_pct": _REM_RIGHT_X2,
                         "y2_pct": round(y2, 2),
                         "comment": str(ann.get("comment", "")),
+                        "text_y1_pct": round(ann_y_clamped - 2.0, 2),
+                        "text_y2_pct": round(ann_y_clamped + 2.0, 2),
+                        "connector_type": "arrow",
+                        "connector_x_pct": 73.0,
+                        "connector_cy_pct": round(ann_y_clamped, 2),
                     })
                 except (TypeError, ValueError):
                     pass
@@ -1317,6 +1727,105 @@ def enrich_remarks_from_annotations(items: list[dict[str, Any]]) -> None:
 
 
 # --- Public API ------------------------------------------------------------------------
+
+
+def _nudge_mark_past_remarks(item: dict[str, Any]) -> None:
+    """If the score mark at marking_y overlaps a right-margin remark, push it below."""
+    my = float(item.get("marking_y_position_percent", 0.0))
+    mp = int(item.get("marking_page", item.get("start_page", 1)))
+    remarks = item.get("remarks") or []
+    right = sorted(
+        [r for r in remarks
+         if r.get("page") == mp and float(r.get("x1_pct", 0)) >= 70.0],
+        key=lambda r: r["y1_pct"],
+    )
+    for r in right:
+        y1, y2 = float(r["y1_pct"]), float(r["y2_pct"])
+        if y1 <= my < y2:
+            my = y2 + 1.0
+    item["marking_y_position_percent"] = round(min(my, 95.0), 2)
+
+
+def _debug_render_annotations(
+    grid_pages: list[bytes],
+    items: list[dict[str, Any]],
+    request_id: str,
+) -> None:
+    """Draw final anchor marks + remark boxes onto saved grid images for visual verification.
+
+    Saves `temp/{request_id}_p{n}_annotated.png` for every page that has at least one mark.
+    Color key:
+      underline → red line       circle/ellipse → green oval
+      tick       → blue dot      remark box     → orange rectangle
+    """
+    try:
+        from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont
+
+        _temp_dir = Path("temp")
+
+        # Build page → PIL Image map from the in-memory grid_pages
+        page_images: dict[int, Any] = {}
+        for idx, page_bytes in enumerate(grid_pages):
+            import io as _io
+            page_images[idx + 1] = _Image.open(_io.BytesIO(page_bytes)).convert("RGB")
+
+        dirty: set[int] = set()
+
+        for item in items:
+            for am in item.get("anchor_marks") or []:
+                pg = int(am.get("page", 1))
+                img = page_images.get(pg)
+                if img is None:
+                    continue
+                W, H = img.width, img.height
+                draw = _ImageDraw.Draw(img)
+                cx = am["cx_pct"] / 100.0 * W
+                cy = am["cy_pct"] / 100.0 * H
+                rx = max(4.0, am["rx_pct"] / 100.0 * W)
+                ry = max(4.0, am["ry_pct"] / 100.0 * H) if am.get("ry_pct", 0) else 4.0
+                t = am["type"]
+                if t == "underline":
+                    draw.line([(cx - rx, cy), (cx + rx, cy)], fill=(220, 20, 20), width=3)
+                elif t in ("circle", "ellipse"):
+                    draw.ellipse([(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                                 outline=(0, 160, 0), width=2)
+                elif t == "tick":
+                    r = 8
+                    draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)],
+                                 fill=(30, 80, 220))
+                dirty.add(pg)
+
+            for rem in item.get("remarks") or []:
+                pg = int(rem.get("page", 1))
+                img = page_images.get(pg)
+                if img is None:
+                    continue
+                W, H = img.width, img.height
+                draw = _ImageDraw.Draw(img)
+                x1 = rem["x1_pct"] / 100.0 * W
+                y1 = rem["y1_pct"] / 100.0 * H
+                x2 = rem["x2_pct"] / 100.0 * W
+                y2 = rem["y2_pct"] / 100.0 * H
+                draw.rectangle([(x1, y1), (x2, y2)], outline=(255, 120, 0), width=2)
+                # Draw connector anchor point
+                conn_x = rem.get("connector_x_pct", 73.0) / 100.0 * W
+                ty1 = rem.get("text_y1_pct", rem["y1_pct"]) / 100.0 * H
+                ty2 = rem.get("text_y2_pct", rem["y2_pct"]) / 100.0 * H
+                draw.line([(x1, (ty1 + ty2) / 2), (conn_x, (ty1 + ty2) / 2)],
+                          fill=(255, 180, 0), width=1)
+                dirty.add(pg)
+
+        import io as _io2
+        for pg in dirty:
+            img = page_images[pg]
+            buf = _io2.BytesIO()
+            img.save(buf, format="PNG", optimize=False)
+            out = _temp_dir / f"{request_id}_p{pg}_annotated.png"
+            out.write_bytes(buf.getvalue())
+            log.info("debug_render: saved %s", out)
+
+    except Exception as exc:  # never crash the main pipeline
+        log.warning("debug_render: failed — %s", exc)
 
 
 def smart_ocr_extract_student_answers(
@@ -1350,6 +1859,14 @@ def smart_ocr_extract_student_answers(
     # Draw the 50×50 reference grid onto every page (fast parallel PIL compositing).
     grid_pages = batch_draw_grid(png_pages, max_workers=max_workers)
     log.info("smart_ocr[%s] grid overlay drawn dpi=%s pages=%s", request_id, dpi, total_pages)
+
+    # Save grid images for inspection.
+    _temp_dir = Path("temp")
+    _temp_dir.mkdir(exist_ok=True)
+    for _i, _gp in enumerate(grid_pages):
+        _out = _temp_dir / f"{request_id}_p{_i + 1}.png"
+        _out.write_bytes(_gp)
+    log.info("smart_ocr[%s] grid images saved to temp/ (%s files)", request_id, len(grid_pages))
 
     # --- Stage 1: OCR + classify+annotate submitted simultaneously ---
     # classify+annotate uses grid PNG → page_type + anchor_marks + remarks in one call.
@@ -1456,6 +1973,50 @@ def smart_ocr_extract_student_answers(
 
     # --- Merge per-page anchor_marks and remarks into items ---
     # Collect all annotations whose page falls within [item.start_page, item.end_page].
+
+    def _clip_marks_to_answer(
+        marks: list[dict[str, Any]],
+        start_page: int,
+        end_page: int,
+        start_y: float,
+        end_y: float,
+        y_key: str = "cy_pct",
+    ) -> list[dict[str, Any]]:
+        """Keep only marks whose page+y fall within the student's answer range.
+
+        - page outside [start_page, end_page]          → exclude
+        - start_page < page < end_page                 → keep (full page is answer body)
+        - page == start_page == end_page               → keep if y in [start_y, end_y]
+        - page == start_page (multi-page, first page)  → keep if y >= start_y
+        - page == end_page   (multi-page, last page)   → keep if y <= end_y
+        """
+        result: list[dict[str, Any]] = []
+        for m in marks:
+            pg = m.get("page", 0)
+            if pg < start_page or pg > end_page:
+                continue
+            if start_page < pg < end_page:
+                result.append(m)
+                continue
+            if y_key == "cy_pct":
+                y = float(m.get("cy_pct", 50.0))
+            else:
+                # Use the CENTER of the remark box so boundary remarks are handled
+                # correctly — a box that straddles start_y is included only if its
+                # center is inside the answer range.
+                y1_r = float(m.get("y1_pct", 0.0))
+                y2_r = float(m.get("y2_pct", y1_r))
+                y = (y1_r + y2_r) / 2.0
+            if pg == start_page and pg == end_page:
+                if start_y <= y <= end_y:
+                    result.append(m)
+            elif pg == start_page:
+                if y >= start_y:
+                    result.append(m)
+            else:
+                if y <= end_y:
+                    result.append(m)
+        return result
     all_anchors: list[dict[str, Any]] = []
     all_remarks: list[dict[str, Any]] = []
     for idx in range(total_pages):
@@ -1463,9 +2024,55 @@ def smart_ocr_extract_student_answers(
         all_remarks.extend(page_remarks[idx])
 
     for item in rows:
-        sp = int(item.get("start_page", 1))
-        ep = int(item.get("end_page", sp))
-        item["anchor_marks"] = [a for a in all_anchors if sp <= a["page"] <= ep]
-        item["remarks"] = [r for r in all_remarks if sp <= r["page"] <= ep]
+        sp  = int(item.get("start_page", 1))
+        ep  = int(item.get("end_page", sp))
+        sy  = float(item.get("start_y_position_percent", 0.0))
+        ey  = float(item.get("end_y_position_percent", 100.0))
+        qid = item.get("question_id", "?")
 
+        # Build per-page bounding description for logging
+        page_spans: list[str] = []
+        for pg in range(sp, ep + 1):
+            if sp == ep:
+                page_spans.append(f"p{pg}[y{sy:.0f}-{ey:.0f}%]")
+            elif pg == sp:
+                page_spans.append(f"p{pg}[y{sy:.0f}-100%]")
+            elif pg == ep:
+                page_spans.append(f"p{pg}[y0-{ey:.0f}%]")
+            else:
+                page_spans.append(f"p{pg}[y0-100%]")
+        log.info("item[q%s] bbox  %s", qid, " ".join(page_spans))
+
+        item["anchor_marks"] = _clip_marks_to_answer(
+            all_anchors, sp, ep, sy, ey, y_key="cy_pct"
+        )
+        # Push the effective start_y past the printed question-text zone.
+        # Remarks within _REMARK_ANSWER_GUARD_PCT of start_y land on the question
+        # header, not on student handwriting — exclude them.
+        _REMARK_ANSWER_GUARD_PCT = 8.0
+        remark_sy = min(sy + _REMARK_ANSWER_GUARD_PCT, ey)
+        item["remarks"] = _clip_marks_to_answer(
+            all_remarks, sp, ep, remark_sy, ey, y_key="center"
+        )
+
+        log.info(
+            "item[q%s] anchors=%s",
+            qid,
+            " ".join(
+                f"p{a['page']}({a['type']}cy={a.get('cy_pct',0):.0f}%)"
+                for a in item["anchor_marks"]
+            ) or "(none)",
+        )
+        log.info(
+            "item[q%s] remarks=%s",
+            qid,
+            " ".join(
+                f"p{r['page']}y[{r.get('y1_pct',0):.0f}-{r.get('y2_pct',0):.0f}%]"
+                for r in item["remarks"]
+            ) or "(none)",
+        )
+
+        _nudge_mark_past_remarks(item)
+
+    _debug_render_annotations(grid_pages, rows, request_id)
     return {"items": rows, "page_count": total_pages}

@@ -57,7 +57,7 @@ def _make_grid_overlay(width: int, height: int) -> Image.Image:
         draw.line([(x, 0), (x, height - 1)], fill=line_color, width=1)
         draw.line([(0, y), (width - 1, y)], fill=line_color, width=1)
 
-    # Numeric labels every 5 grid points along the bottom edge and right edge.
+    # Numeric labels 1–50 along the top edge (columns) and left edge (rows).
     try:
         font = ImageFont.load_default(size=max(8, min(14, int(x_step * 0.7))))
     except TypeError:
@@ -66,16 +66,13 @@ def _make_grid_overlay(width: int, height: int) -> Image.Image:
     label_color = (80, 80, 200, 200)   # blue-ish, readable
 
     for i in range(1, GRID_SIZE + 1):
-        if i == 1 or i % 5 == 0:
-            x = round((i - 1) * x_step)
-            y = round((i - 1) * y_step)
-            label = str(i)
-            # bottom edge label
-            bottom_y = height - round(y_step) + 1
-            draw.text((x + 1, bottom_y), label, fill=label_color, font=font)
-            # right edge label
-            right_x = width - round(x_step) + 1
-            draw.text((right_x, y + 1), label, fill=label_color, font=font)
+        x = round((i - 1) * x_step)
+        y = round((i - 1) * y_step)
+        label = str(i)
+        # top edge label (column numbers)
+        draw.text((x + 1, 1), label, fill=label_color, font=font)
+        # left edge label (row numbers)
+        draw.text((1, y + 1), label, fill=label_color, font=font)
 
     return overlay
 
