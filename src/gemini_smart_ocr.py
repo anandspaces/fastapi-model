@@ -88,6 +88,17 @@ _LAYOUT_ZONE_SCHEMA = types.Schema(
     property_ordering=["y1", "y2"],
 )
 
+_CONTENT_LINE_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "y":  types.Schema(type=types.Type.INTEGER, description="Baseline grid row of this handwriting line (6-45)"),
+        "x1": types.Schema(type=types.Type.INTEGER, description="Leftmost grid column with ink on this line (1-37)"),
+        "x2": types.Schema(type=types.Type.INTEGER, description="Rightmost grid column with ink on this line (1-37)"),
+    },
+    required=["y", "x1", "x2"],
+    property_ordering=["y", "x1", "x2"],
+)
+
 _CLASSIFY_ANNOTATION_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
@@ -111,19 +122,28 @@ _CLASSIFY_ANNOTATION_SCHEMA = types.Schema(
                 "Right margin columns 38-50 are always structurally free and are NOT content."
             ),
         ),
+        "content_lines": types.Schema(
+            type=types.Type.ARRAY,
+            items=_CONTENT_LINE_SCHEMA,
+            description=(
+                "Every individual handwriting line on the page. "
+                "y = baseline row of the line, x1/x2 = leftmost/rightmost column with ink. "
+                "List ALL lines top-to-bottom — one entry per written line."
+            ),
+        ),
         "anchor_marks": types.Schema(
             type=types.Type.ARRAY,
             items=_ANCHOR_MARK_SCHEMA,
-            description="3-5 SUGGESTED teacher markup positions on student handwriting.",
+            description="4-7 SUGGESTED teacher markup positions on student handwriting.",
         ),
         "remarks": types.Schema(
             type=types.Type.ARRAY,
             items=_REMARK_BOX_SCHEMA,
-            description="2-4 free-whitespace bounding boxes in FREE ZONES only (see content_bands). Spread them across the full vertical range of the page — early, middle, and late y positions.",
+            description="3-5 free-whitespace bounding boxes in FREE ZONES only (see content_bands). Spread them across the full vertical range of the page — early, middle, and late y positions.",
         ),
     },
     required=["page_type", "content_bands", "anchor_marks", "remarks"],
-    property_ordering=["page_type", "content_bands", "anchor_marks", "remarks"],
+    property_ordering=["page_type", "content_bands", "content_lines", "anchor_marks", "remarks"],
 )
 
 
@@ -205,22 +225,45 @@ If DUPLICATE → output exactly:
 and stop.
 
 ════════════════════════════════════════════════════════
-STEP 2 — Map handwriting bands (rows 6–45 only).
-Identify every contiguous band of STUDENT HANDWRITING rows.
+STEP 2 — Map handwriting layout (rows 6–45 only).
   • Ignore printed question text, ruled lines, boxes.
   • Rows 1–8 are top margin (printed header/roll box) — never list as content.
   • Rows 46–50 are bottom margin — never list as content.
   • Columns 38–50 are always the right margin — content stays in columns 1–37.
-Record each band: {{"y1": first_row_with_ink, "y2": last_row_with_ink}}
-  Example: writing rows 8–22, gap, then rows 28–43:
-  content_bands: [{{"y1":8,"y2":22}},{{"y1":28,"y2":43}}]
-IMPORTANT: The last band's y2 MUST reach the final handwriting row including
-conclusion paragraphs in the lower half. Scan rows 30–45 explicitly.
+
+2a. content_bands — group rows into contiguous handwriting bands.
+  Record each band: {{"y1": first_row_with_ink, "y2": last_row_with_ink}}
+  Example: writing rows 9–22, gap, then rows 28–43:
+  content_bands: [{{"y1":9,"y2":22}},{{"y1":28,"y2":43}}]
+  IMPORTANT: The last band's y2 MUST reach the final handwriting row including
+  conclusion paragraphs in the lower half. Scan rows 30–45 explicitly.
+
+2b. content_lines — list EVERY individual handwriting line, one entry per written line.
+  For each line record:
+    y  = the grid row at the INK BASELINE of that line (bottom edge of the letters)
+    x1 = leftmost grid column where ink starts on this line
+    x2 = rightmost grid column where ink ends on this line
+  List ALL lines top-to-bottom. Do not skip any line, including short one-word lines.
+  Example (3 lines in a paragraph):
+  content_lines: [{{"y":9,"x1":5,"x2":32}},{{"y":11,"x1":5,"x2":30}},{{"y":13,"x1":5,"x2":18}}]
 
 ════════════════════════════════════════════════════════
-STEP 3 — Place ANCHOR MARKS (4–7) exactly as a human teacher would.
+STEP 3 — Place ANCHOR MARKS (6–10) — BE DENSE, cover the full page.
 
 A real teacher marks differently depending on what is written:
+
+  ── UNDERLINE — MANDATORY: mark EVERY semantically important term ───────────
+  • Underline under EVERY key vocabulary word, concept, technical term, or
+    correctly-used phrase the student has written.
+  • For PARAGRAPH: place 4–6 underlines distributed across the full answer body —
+    early lines, middle lines, AND late lines. Never cluster all underlines at top.
+  • For CORRECTION: underline every corrected verb/noun form.
+  • For WORD_LIST: underline correct answer words in each pair row.
+  • cy = BOTTOM EDGE of the word's ink (baseline row), not its vertical centre.
+  • rx = half-width of the underlined phrase in grid units. cx ∈ [8, 34].
+  • (cx − rx) ≥ 6 and (cx + rx) ≤ 36.
+  • MINIMUM 4 underlines per page even on short answers; use the most
+    content-rich lines if there are fewer words.
 
   ── TICK (✓) — Place next to each CORRECT student point or pair ──────────
   • cx must be in columns 5–8 (left edge, beside numbered items) OR
@@ -231,59 +274,67 @@ A real teacher marks differently depending on what is written:
   • If no answer is clearly correct, emit ZERO ticks — never fake a tick.
   • cx ∈ [5, 8] for left-margin ticks. rx = 0, ry = 0.
 
-  ── UNDERLINE — Mark key terms the student correctly wrote ───────────────
-  • Underline under a key vocabulary word or concept correctly used.
-  • For CORRECTION: underline the corrected verb/noun form (the fix itself).
-  • For PARAGRAPH: underline 2–3 key terms dispersed across the answer body.
-  • cy = BOTTOM EDGE of the word's ink (baseline row), not its vertical centre.
-  • rx = half-width of the underlined phrase. cx ∈ [8, 34].
-  • (cx − rx) ≥ 6 and (cx + rx) ≤ 36.
-
   ── ELLIPSE — Highlight a multi-word phrase (2–4 words) ──────────────────
   • Use for a short correct phrase (not a single word, not a whole sentence).
   • ry ≤ 1 grid unit (tight horizontal oval). cx ∈ [8, 34].
 
   PAGE-TYPE STRATEGY:
-  • WORD_LIST   → prefer ticks + ellipses (correct vs wrong pairs); minimal underlines
+  • WORD_LIST   → prefer ticks + ellipses (correct vs wrong pairs) + underlines on key words
   • CORRECTION  → prefer ticks on correct lines + ellipses on wrong words + underlines on corrections
-  • PARAGRAPH   → prefer underlines + ellipses on key ideas; ticks only on strong conclusions
-  • UNKNOWN     → 2 underlines + 1 ellipse minimum
+  • PARAGRAPH   → DENSE underlines (4–6) distributed top-to-bottom + ellipses on key ideas;
+                  ticks only on strong conclusions
+  • UNKNOWN     → minimum 4 underlines + 1 ellipse
 
   MANDATORY RULES:
+  • Total anchor_marks ≥ 6 (aim for 8–10 on paragraph pages).
   • cx for ALL marks must be 8–34 EXCEPT left-margin ticks which use cx 5–8.
   • For underlines: cy is the BOTTOM of the word's ink, not the row centre.
   • NEVER place marks on printed question text, headers, or blank rows.
   • First mark must be ≥ row 13 (or wherever student handwriting starts).
+  • DISTRIBUTE marks evenly: do not cluster all in the top third.
 
 ════════════════════════════════════════════════════════
-STEP 4 — Place REMARK BOXES (3–5) with real teacher comments.
+STEP 4 — Place REMARK BOXES — ONE PER CONTENT BAND (minimum 4 total).
 
 {comment_bank}
 
-PLACEMENT LOGIC (human teacher behaviour):
-  1. Each remark box must be NEAR the text it comments on — same y region.
-  2. Alternate sides: odd remarks in RIGHT margin, even remarks in LEFT margin.
-     (Or use inline gap remarks where there is a clear horizontal blank gap.)
-  3. RIGHT margin zone : x1 ≥ 38, x2 ≤ 49, y1 ≥ 9, y2 ≤ 45. Always free.
-  4. LEFT margin zone  : x1 ≥ 1,  x2 ≤ 12, y1 ≥ 9, y2 ≤ 45. Always free.
-  5. INLINE GAP remark : x1=5, x2=37; ONLY inside a horizontal gap outside all content_bands.
-     Must span the ENTIRE gap (expand to fill all free rows of the gap).
-  6. NEVER overlap a content_band unless it is in the right or left margin zone.
-  7. NEVER y1 < 9 or y2 > 45. x2 > x1. y2 > y1. Width ≥ 5. Height ≥ 3.
+REMARK BOX GEOMETRY — WIDE FLAT STRIPS, NOT TALL BOXES:
+  Each remark box must be a WIDE HORIZONTAL STRIP — like a single annotation line:
+  • Height: y2 − y1 = 2 to 3 grid rows only (never taller than 4 rows).
+  • Width : x2 − x1 ≥ 10 grid units (wide enough to read the comment clearly).
+  • Right margin strip example: x1=39, x2=49, y1=12, y2=14
+  • Left  margin strip example: x1=1,  x2=11, y1=20, y2=22
+  • Inline gap strip example  : x1=5,  x2=37, y1=24, y2=26   ← full content-width strip
 
-  REMARK DISTRIBUTION across the page:
-  • Top third of answer    → RIGHT margin
-  • Middle of answer       → LEFT margin (or inline gap if one exists)
-  • Lower middle           → RIGHT margin
-  • Bottom of answer       → LEFT margin
+  Think of each remark as a sticky note STRIP along the margin or inside a blank gap —
+  it should span horizontally rather than stack vertically.
+
+PLACEMENT RULES — ONE REMARK PER CONTENT BAND:
+  1. For EACH content_band you identified in STEP 2, place exactly ONE remark box.
+     Its y-centre must fall within that band's [y1, y2] range.
+  2. Add extra remarks for inline gaps (blank rows between bands) — use full-width strip.
+  3. RIGHT margin zone : x1=39, x2=49, y1/y2 within the band. Use for ODD-numbered bands.
+  4. LEFT margin zone  : x1=1,  x2=11, y1/y2 within the band. Use for EVEN-numbered bands.
+  5. INLINE GAP strip  : x1=5, x2=37; spans the entire blank gap between two bands.
+  6. NEVER overlap a content_band (for non-margin remarks).
+  7. NEVER y1 < 9 or y2 > 45. x2 > x1. y2 = y1 + 2 (preferred) or y1 + 3 max.
+  8. Width ≥ 10 units always.
+
+  MINIMUM COUNT: max(4, number_of_content_bands) remark boxes.
+
+  DISTRIBUTION — spread across the full vertical range:
+  • Bands in rows 9–20   → RIGHT margin strip
+  • Bands in rows 20–30  → LEFT margin strip  (or inline gap strip if gap present)
+  • Bands in rows 30–38  → RIGHT margin strip
+  • Bands in rows 38–45  → LEFT margin strip
 
   REMARK CONTENT rules:
   • Pick the single most fitting comment from the COMMENT BANK above.
-  • Keep comments ≤ 4 words (they must fit in a small margin box).
+  • Keep comments ≤ 4 words (they must fit in a wide strip).
   • Match the comment to the SPECIFIC text at that y-position on the page.
-  • Right-margin example : {{"x1":39,"y1":10,"x2":49,"y2":14,"comment":"सही"}}
-  • Left-margin example  : {{"x1":2, "y1":20,"x2":12,"y2":24,"comment":"Incomplete"}}
-  • Inline-gap example   : {{"x1":5, "y1":22,"x2":37,"y2":28,"comment":"अपूर्ण"}}
+  • Right-margin strip : {{"x1":39,"y1":10,"x2":49,"y2":12,"comment":"सही"}}
+  • Left-margin strip  : {{"x1":1, "y1":20,"x2":11,"y2":22,"comment":"Incomplete"}}
+  • Inline-gap strip   : {{"x1":5, "y1":23,"x2":37,"y2":25,"comment":"अपूर्ण"}}
 
 All coordinates: integers in [1, 50]."""
 
@@ -660,6 +711,7 @@ def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, An
     base = _parse_annotation_response(raw, page_num)
     page_type = "UNKNOWN"
     content_bands: list[dict[str, float]] = []
+    content_lines_parsed: list[dict[str, int]] = []
     for candidate in (_strip_json_fence(raw), _repair_json(raw)):
         try:
             data = json.loads(candidate)
@@ -676,7 +728,23 @@ def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, An
             content_bands = _merge_content_bands(content_bands)
             content_bands = _extend_last_band(content_bands, raw_anchor_cys, page_type)
 
-            # Drop circles/ellipses that sit in blank inter-paragraph gaps (not around any word).
+            # Parse individual content lines for coordinate logging.
+            raw_lines = data.get("content_lines", [])
+            content_lines_parsed: list[dict[str, int]] = []
+            for ln in raw_lines if isinstance(raw_lines, list) else []:
+                if not isinstance(ln, dict):
+                    continue
+                try:
+                    content_lines_parsed.append({
+                        "y":  max(1, min(50, int(ln.get("y",  25)))),
+                        "x1": max(1, min(50, int(ln.get("x1",  1)))),
+                        "x2": max(1, min(50, int(ln.get("x2", 37)))),
+                    })
+                except (TypeError, ValueError):
+                    pass
+            content_lines_parsed.sort(key=lambda l: l["y"])
+
+            # Drop ellipses that sit in blank inter-paragraph gaps (not around any word).
             if content_bands:
                 def _cy_in_band(cy_g: float) -> bool:
                     return any(b["y1"] <= cy_g <= b["y2"] for b in content_bands)
@@ -708,6 +776,17 @@ def _parse_classify_annotation_response(raw: str, page_num: int) -> dict[str, An
         "layout[p%s] free_zones=%s",
         page_num, " ".join(free_zones),
     )
+    # Log every detected handwriting line with its grid bounding box.
+    if content_lines_parsed:
+        log.info(
+            "layout[p%s] lines(%s)= %s",
+            page_num,
+            len(content_lines_parsed),
+            "  ".join(
+                f"row{l['y']}:col[{l['x1']}-{l['x2']}]"
+                for l in content_lines_parsed
+            ),
+        )
     # ─────────────────────────────────────────────────────────────────────────
 
     if page_type == "DUPLICATE":
@@ -762,7 +841,7 @@ def _classify_and_annotate_page(
     ]
     cfg = types.GenerateContentConfig(
         temperature=0.0,
-        max_output_tokens=4096,
+        max_output_tokens=8192,
         response_mime_type="application/json",
         response_schema=_CLASSIFY_ANNOTATION_SCHEMA,
     )
