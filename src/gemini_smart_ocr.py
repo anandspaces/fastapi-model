@@ -1860,13 +1860,13 @@ def smart_ocr_extract_student_answers(
     grid_pages = batch_draw_grid(png_pages, max_workers=max_workers)
     log.info("smart_ocr[%s] grid overlay drawn dpi=%s pages=%s", request_id, dpi, total_pages)
 
-    # Save grid images for inspection.
-    _temp_dir = Path("temp")
-    _temp_dir.mkdir(exist_ok=True)
-    for _i, _gp in enumerate(grid_pages):
-        _out = _temp_dir / f"{request_id}_p{_i + 1}.png"
-        _out.write_bytes(_gp)
-    log.info("smart_ocr[%s] grid images saved to temp/ (%s files)", request_id, len(grid_pages))
+    # # Save grid images for inspection.
+    # _temp_dir = Path("temp")
+    # _temp_dir.mkdir(exist_ok=True)
+    # for _i, _gp in enumerate(grid_pages):
+    #     _out = _temp_dir / f"{request_id}_p{_i + 1}.png"
+    #     _out.write_bytes(_gp)
+    # log.info("smart_ocr[%s] grid images saved to temp/ (%s files)", request_id, len(grid_pages))
 
     # --- Stage 1: OCR + classify+annotate submitted simultaneously ---
     # classify+annotate uses grid PNG → page_type + anchor_marks + remarks in one call.
@@ -2074,5 +2074,5 @@ def smart_ocr_extract_student_answers(
 
         _nudge_mark_past_remarks(item)
 
-    _debug_render_annotations(grid_pages, rows, request_id)
+    # _debug_render_annotations(grid_pages, rows, request_id)
     return {"items": rows, "page_count": total_pages}
