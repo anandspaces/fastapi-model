@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import concurrent.futures
 import json
 from datetime import datetime, timedelta, timezone
 import logging
@@ -1469,6 +1470,12 @@ async def post_analyse_smart_ocr(
             api_key,
             lang,
             request_id=rid,
+        )
+    except concurrent.futures.TimeoutError:
+        log.warning("analyse/smart-ocr deadline exceeded request_id=%s", rid)
+        return JSONResponse(
+            _err("Smart-OCR exceeded time budget; try a smaller PDF or raise SMART_OCR_TOTAL_TIMEOUT_S."),
+            status_code=504,
         )
     except ValueError as e:
         log.warning("analyse/smart-ocr rejected request_id=%s: %s", rid, e)

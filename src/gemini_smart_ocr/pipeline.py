@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,12 @@ from src.gemini_copy_ocr import (
 from src.grid_overlay import batch_draw_grid
 
 from .classify import classify_and_annotate_page
-from .config import DEFAULT_CLASSIFY_WAIT_TIMEOUT_S, REMARK_ANSWER_GUARD_PCT
+from .config import (
+    DEFAULT_CLASSIFY_WAIT_TIMEOUT_S,
+    REMARK_ANSWER_GUARD_PCT,
+    SMART_OCR_TOTAL_TIMEOUT_S,
+    STRUCTURE_MAX_OUTPUT_TOKENS,
+)
 from .dedup import deduplicate_page_texts, extract_page_body
 from .layout import (
     annotations_grid_to_pct,
@@ -131,17 +137,21 @@ def smart_ocr_extract_student_answers(
         return idx, block
 
     # 2× workers: N classify+annotate + N OCR jobs share one pool.
+    # Whole-request wall-clock guard: as_completed(timeout=) raises
+    # concurrent.futures.TimeoutError if the deadline elapses, which main.py
+    # maps to HTTP 504.
+    deadline = time.monotonic() + SMART_OCR_TOTAL_TIMEOUT_S
     with ThreadPoolExecutor(max_workers=max_workers * 2) as pool:
         cls_ann_futs = [pool.submit(_classify_annotate_job, i) for i in range(total_pages)]
         ocr_futs     = [pool.submit(_ocr_job, i) for i in range(total_pages)]
-        for fut in as_completed(cls_ann_futs):
+        for fut in as_completed(cls_ann_futs, timeout=max(1.0, deadline - time.monotonic())):
             idx, result = fut.result()
             anchors_pct, remarks_pct = annotations_grid_to_pct(
                 result["anchor_marks"], result["remarks"], idx + 1
             )
             page_anchor_marks[idx] = anchors_pct
             page_remarks[idx] = spread_remarks_two_column(remarks_pct, page_num=idx + 1)
-        for fut in as_completed(ocr_futs):
+        for fut in as_completed(ocr_futs, timeout=max(1.0, deadline - time.monotonic())):
             idx, block = fut.result()
             page_blocks[idx] = block
 
@@ -161,7 +171,7 @@ def smart_ocr_extract_student_answers(
     expected_questions = estimate_expected_questions(page_blocks)
     log.info(
         "smart_ocr[%s] structure input_tokens_est=%s output_cap=%s expected_questions=%s",
-        request_id, payload_tokens_est, 65536, expected_questions,
+        request_id, payload_tokens_est, STRUCTURE_MAX_OUTPUT_TOKENS, expected_questions,
     )
 
     structure_client = genai.Client(api_key=api_key)

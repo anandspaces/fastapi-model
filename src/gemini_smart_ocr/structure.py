@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from google import genai
@@ -24,8 +24,13 @@ from google.genai import types
 
 from .config import (
     ANSWER_TYPES,
-    RETRY_BACKOFF_S,
+    STRUCTURE_CHUNK_PAGES,
+    STRUCTURE_CHUNK_THRESHOLD,
+    STRUCTURE_HTTP_TIMEOUT_MS,
     STRUCTURE_MAX_OUTPUT_TOKENS,
+    afc_off,
+    finish_reason_name,
+    http_opts,
     structure_model,
     thinking_off,
 )
@@ -166,7 +171,6 @@ def _parse_structure_sections(raw: str, total_pages: int) -> list[dict[str, Any]
         parsed = candidate
         break
     if parsed is None:
-        log.warning("smart_ocr structure JSON parse failed: invalid JSON")
         raise ValueError("invalid JSON")
 
     if not isinstance(parsed, dict):
@@ -214,34 +218,107 @@ def _run_structure_pass(
     total_pages: int,
     *,
     expected_questions: int | None = None,
+    use_schema: bool = False,
 ) -> list[dict[str, Any]]:
+    """Single-shot Stage-2 Gemini call. Schema-less by default (2–3× faster generation);
+    callers fall back to ``use_schema=True`` on parse failure.
+    """
     prompt = build_structure_prompt(language, total_pages, expected_questions)
     parts = [
         types.Part.from_text(text=prompt),
         types.Part.from_text(text=pages_payload_json),
     ]
-    cfg = types.GenerateContentConfig(
+    cfg_kwargs: dict[str, Any] = dict(
         temperature=0.1,
         max_output_tokens=STRUCTURE_MAX_OUTPUT_TOKENS,
         response_mime_type="application/json",
-        response_schema=STRUCTURE_ROOT_SCHEMA,
         thinking_config=thinking_off(),
+        automatic_function_calling=afc_off(),
+        http_options=http_opts(STRUCTURE_HTTP_TIMEOUT_MS),
     )
+    if use_schema:
+        cfg_kwargs["response_schema"] = STRUCTURE_ROOT_SCHEMA
+    cfg = types.GenerateContentConfig(**cfg_kwargs)
     model = structure_model()
-    last_err: Exception | None = None
-    for attempt in range(1, 3):
+    try:
         resp = client.models.generate_content(model=model, contents=parts, config=cfg)
-        raw = (getattr(resp, "text", None) or "").strip()
-        if not raw:
-            raise ValueError("Structure pass returned an empty response.")
+    except Exception as e:
+        raise ValueError(f"Structure pass HTTP failure: {e}") from e
+    raw = (getattr(resp, "text", None) or "").strip()
+    fr = finish_reason_name(resp)
+    if not raw:
+        raise ValueError(f"Structure pass empty response finish_reason={fr}")
+    if fr == "MAX_TOKENS":
+        log.warning(
+            "structure_qa MAX_TOKENS truncation cap=%s schema=%s prefix=%r tail=%r",
+            STRUCTURE_MAX_OUTPUT_TOKENS, use_schema, raw[:300], raw[-200:],
+        )
+        raise ValueError(f"structure truncated (MAX_TOKENS): cap={STRUCTURE_MAX_OUTPUT_TOKENS}")
+    try:
+        return _parse_structure_sections(raw, total_pages)
+    except ValueError as e:
+        log.warning(
+            "structure_qa parse failure schema=%s finish_reason=%s len=%s prefix=%r tail=%r err=%s",
+            use_schema, fr, len(raw), raw[:500], raw[-200:], e,
+        )
+        raise
+
+
+def _merge_and_dedup(
+    row_groups: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Concat row groups, sort by (start_page, start_y, qid), drop duplicate question_ids."""
+    merged: list[dict[str, Any]] = []
+    for g in row_groups:
+        merged.extend(g)
+    merged.sort(key=_structure_item_sort_key)
+    seen: set[Any] = set()
+    out: list[dict[str, Any]] = []
+    for it in merged:
+        qid = it.get("question_id")
+        if qid not in seen:
+            out.append(it)
+            seen.add(qid)
+    return out
+
+
+def _run_structure_chunked(
+    client: genai.Client,
+    pages: list[dict[str, Any]],
+    language: str,
+    total_pages: int,
+) -> list[dict[str, Any]]:
+    """Split ``pages`` into ``STRUCTURE_CHUNK_PAGES``-sized chunks; run them in parallel.
+
+    Each chunk tries schema-less first then schema-enabled retry on parse failure.
+    Chunk-level failures are logged and skipped — survivors are merged + deduped.
+    """
+    chunk_size = max(2, STRUCTURE_CHUNK_PAGES)
+    chunks = [pages[i:i + chunk_size] for i in range(0, len(pages), chunk_size)]
+    log.info(
+        "structure_qa chunked pages=%s chunks=%s chunk_size=%s",
+        len(pages), len(chunks), chunk_size,
+    )
+
+    def _job(chunk: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        payload = json.dumps({"pages": chunk}, ensure_ascii=False)
         try:
-            return _parse_structure_sections(raw, total_pages)
-        except ValueError as e:
-            last_err = e
-            log.warning("structure_qa parse attempt %s/2 failed: %s", attempt, e)
-            if attempt < 2:
-                time.sleep(RETRY_BACKOFF_S * 0.8)
-    raise ValueError(f"Structure pass failed after 2 attempts: {last_err}") from last_err
+            return _run_structure_pass(client, payload, language, total_pages, use_schema=False)
+        except Exception as e:
+            log.warning("structure_qa chunk schema-less failed: %s — retry with schema", e)
+            return _run_structure_pass(client, payload, language, total_pages, use_schema=True)
+
+    groups: list[list[dict[str, Any]]] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
+        for fut in as_completed([pool.submit(_job, c) for c in chunks]):
+            try:
+                groups.append(fut.result())
+            except Exception as e:
+                log.warning("structure_qa chunk permanently failed: %s", e)
+    out = _merge_and_dedup(groups)
+    if not out:
+        raise ValueError("Structure pass failed: all chunks returned no items.")
+    return out
 
 
 def structure_qa_with_fallback(
@@ -252,37 +329,42 @@ def structure_qa_with_fallback(
     *,
     expected_questions: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Run Stage 2; on undercount, retry once with a halved payload and merge."""
-    pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
-    rows = _run_structure_pass(
-        client, pages_payload_json, language, total_pages,
-        expected_questions=expected_questions,
-    )
-    if expected_questions and len(rows) < max(1, int(expected_questions * 0.8)):
-        pages = pages_payload.get("pages", [])
-        if not isinstance(pages, list) or len(pages) < 2:
-            return rows
+    """Run Stage 2.
+
+    Strategy: chunk-by-default for multi-page payloads (parallel Gemini calls);
+    schema-less first, schema fallback on parse failure; if expected_questions
+    is provided and the result undercounts, re-chunk as a final retry.
+    """
+    pages = pages_payload.get("pages", []) if isinstance(pages_payload, dict) else []
+
+    if isinstance(pages, list) and len(pages) > STRUCTURE_CHUNK_THRESHOLD:
+        return _run_structure_chunked(client, pages, language, total_pages)
+
+    payload_json = json.dumps(pages_payload, ensure_ascii=False)
+    try:
+        rows = _run_structure_pass(
+            client, payload_json, language, total_pages,
+            expected_questions=expected_questions, use_schema=False,
+        )
+    except Exception as e:
+        log.warning("structure_qa schema-less pass failed: %s — retry with schema", e)
+        rows = _run_structure_pass(
+            client, payload_json, language, total_pages,
+            expected_questions=expected_questions, use_schema=True,
+        )
+
+    if (
+        expected_questions
+        and len(rows) < max(1, int(expected_questions * 0.8))
+        and isinstance(pages, list)
+        and len(pages) >= 2
+    ):
         log.warning(
-            "structure_qa undercount got=%s expected~%s; retry split",
+            "structure_qa undercount got=%s expected~%s — chunked retry",
             len(rows), expected_questions,
         )
-        mid = len(pages) // 2
-        first = {"pages": pages[:mid]}
-        second = {"pages": pages[mid:]}
-        rows1 = _run_structure_pass(
-            client, json.dumps(first, ensure_ascii=False), language, total_pages,
-        )
-        rows2 = _run_structure_pass(
-            client, json.dumps(second, ensure_ascii=False), language, total_pages,
-        )
-        rows = rows1 + rows2
-        rows.sort(key=_structure_item_sort_key)
-        seen_ids: set[Any] = set()
-        deduped: list[dict[str, Any]] = []
-        for item in rows:
-            qid = item.get("question_id")
-            if qid not in seen_ids:
-                deduped.append(item)
-                seen_ids.add(qid)
-        rows = deduped
+        try:
+            rows = _run_structure_chunked(client, pages, language, total_pages)
+        except ValueError as e:
+            log.warning("structure_qa chunked retry failed: %s (keeping primary rows)", e)
     return rows

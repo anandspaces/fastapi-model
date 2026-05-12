@@ -40,9 +40,19 @@ REMARK_ANSWER_GUARD_PCT = 8.0   # skip past printed question-text zone from star
 # Gemini call shape
 CLASSIFY_MAX_OUTPUT_TOKENS = 8192
 OCR_MAX_OUTPUT_TOKENS = 8192
-STRUCTURE_MAX_OUTPUT_TOKENS = 65536
+STRUCTURE_MAX_OUTPUT_TOKENS = int(os.environ.get("SMART_OCR_STRUCTURE_MAX_TOKENS", "16000"))
 DEFAULT_CLASSIFY_WAIT_TIMEOUT_S = 12.0
 RETRY_BACKOFF_S = 0.5
+
+# Hard per-call HTTP timeouts (milliseconds — google-genai 1.68 HttpOptions.timeout is ms).
+CLASSIFY_HTTP_TIMEOUT_MS  = int(os.environ.get("SMART_OCR_CLASSIFY_TIMEOUT_MS",  "60000"))
+OCR_HTTP_TIMEOUT_MS       = int(os.environ.get("SMART_OCR_OCR_TIMEOUT_MS",       "60000"))
+STRUCTURE_HTTP_TIMEOUT_MS = int(os.environ.get("SMART_OCR_STRUCTURE_TIMEOUT_MS", "60000"))
+# Whole-request deadline (seconds). Pipeline raises concurrent.futures.TimeoutError if exceeded.
+SMART_OCR_TOTAL_TIMEOUT_S = float(os.environ.get("SMART_OCR_TOTAL_TIMEOUT_S",     "180"))
+# Structure-stage chunking: split into K parallel chunks when page_count > threshold.
+STRUCTURE_CHUNK_PAGES     = int(os.environ.get("SMART_OCR_STRUCTURE_CHUNK_PAGES",     "5"))
+STRUCTURE_CHUNK_THRESHOLD = int(os.environ.get("SMART_OCR_STRUCTURE_CHUNK_THRESHOLD", "6"))
 
 # Page-dedup similarity threshold
 DEFAULT_DEDUP_SIM_THRESHOLD = 0.92
@@ -75,3 +85,22 @@ def structure_model() -> str:
 def thinking_off() -> types.ThinkingConfig:
     """Disable extended-thinking tokens (biggest single latency / cost drop on 2.5 series)."""
     return types.ThinkingConfig(thinking_budget=0)
+
+
+def afc_off() -> types.AutomaticFunctionCallingConfig:
+    """Skip the SDK's Automatic Function Calling planner — no tools are configured."""
+    return types.AutomaticFunctionCallingConfig(disable=True)
+
+
+def http_opts(timeout_ms: int) -> types.HttpOptions:
+    """Build an HttpOptions with a hard per-call timeout. ``timeout`` is in milliseconds."""
+    return types.HttpOptions(timeout=timeout_ms)
+
+
+def finish_reason_name(resp) -> str:
+    """Best-effort string name of ``resp.candidates[0].finish_reason`` (e.g. STOP, MAX_TOKENS)."""
+    try:
+        fr = resp.candidates[0].finish_reason
+        return getattr(fr, "name", str(fr)) if fr is not None else "NONE"
+    except (AttributeError, IndexError, TypeError):
+        return "UNKNOWN"

@@ -17,10 +17,14 @@ from google import genai
 from google.genai import types
 
 from .config import (
+    CLASSIFY_HTTP_TIMEOUT_MS,
     CLASSIFY_MAX_OUTPUT_TOKENS,
     PAGE_TYPES,
     RETRY_BACKOFF_S,
+    afc_off,
     classify_model,
+    finish_reason_name,
+    http_opts,
     thinking_off,
 )
 from .layout import (
@@ -198,17 +202,27 @@ def classify_and_annotate_page(
         response_mime_type="application/json",
         response_schema=CLASSIFY_ANNOTATION_SCHEMA,
         thinking_config=thinking_off(),
+        automatic_function_calling=afc_off(),
+        http_options=http_opts(CLASSIFY_HTTP_TIMEOUT_MS),
     )
     model = classify_model()
     last_raw = ""
     for attempt in range(1, 3):
-        resp = client.models.generate_content(model=model, contents=parts, config=cfg)
-        last_raw = (getattr(resp, "text", None) or "").strip()
-        if not last_raw:
+        try:
+            resp = client.models.generate_content(model=model, contents=parts, config=cfg)
+        except Exception as e:
+            log.warning("classify_annotate[p%s] attempt=%s call failed: %s", page_num, attempt, e)
             if attempt < 2:
                 time.sleep(RETRY_BACKOFF_S)
             continue
-        log.info("classify_annotate[p%s] raw_response=%s", page_num, last_raw)
+        last_raw = (getattr(resp, "text", None) or "").strip()
+        fr = finish_reason_name(resp)
+        if not last_raw:
+            log.warning("classify_annotate[p%s] empty response finish_reason=%s", page_num, fr)
+            if attempt < 2:
+                time.sleep(RETRY_BACKOFF_S)
+            continue
+        log.info("classify_annotate[p%s] finish_reason=%s raw_response=%s", page_num, fr, last_raw)
         result = _parse_classify_response(last_raw, page_num)
         if result["page_type"] != "UNKNOWN" or result["anchor_marks"] or result["remarks"]:
             return result
