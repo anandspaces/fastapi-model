@@ -1,36 +1,32 @@
-"""Top-level smart-OCR orchestrator.
+"""Smart-OCR orchestrator — three explicit steps.
 
-End-to-end flow per request:
+Step 1 — grid overlay. Rasterize the PDF at 300+ DPI, composite the 50×50
+reference grid on each page. No Gemini calls.
 
-  1. Rasterize the PDF (300+ DPI) and composite the 50×50 reference grid.
-  2. Stage 1A (classify + annotate)  — parallel, grid-PNG, one Gemini call/page.
-     Stage 1B (per-page OCR)         — parallel, clean PNG, one Gemini call/page.
-     Both stages live in the same thread pool so OCR can start the moment its
-     page's classification is known; ``DUPLICATE`` pages skip OCR entirely.
-  3. Page-similarity dedup collapses near-identical neighbouring pages.
-  4. Stage 2 (structure): a single Gemini call turns the OCR JSON payload into
-     ``items`` (sections → flat question rows). Falls back to a halved-payload
-     retry on undercount.
-  5. Anchor marks + remark boxes are clipped to each item's answer range and
-     attached. The marking_y position is nudged past any right-margin remark
-     so the score doesn't land on top of teacher feedback.
+Step 2 — parallel per-page OCR + Q&A extraction with intro skip on page 1.
+One Gemini call per page (``extract_page`` from ``step2_page.py``). Each call
+returns ``text``, ``is_intro`` (only meaningful on page 1), and the page's
+per-page question records. A deterministic merger (``merge_per_page_questions``)
+stitches the records into global ``items[]``.
 
-Public API (unchanged for HTTP layer):
-  ``smart_ocr_extract_student_answers(pdf_path, api_key, language, *, request_id)``
-  returns ``{"items": [...], "page_count": N}``.
+Step 3 — per-question-id parallel marking. For each item, one Gemini call
+(``mark_item`` from ``step3_mark.py``) that consumes the item, the grid-overlaid
+pages spanning the item, and the matching model-answer-key entry, and returns
+the item enriched with grading + remarks + anchor marks + annotations.
+
+Public API:
+  ``smart_ocr_run(pdf_path, api_key, language, answer_model, check_level, *, request_id)``
+  returns ``{"items", "page_count", "skipped_pages"}``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import threading
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-
-from google import genai
 
 from src.gemini_copy_ocr import (
     copy_ocr_max_pages,
@@ -39,39 +35,35 @@ from src.gemini_copy_ocr import (
     count_pdf_pages,
     rasterize_pdf_to_png_pages,
 )
+from src.gemini_evaluate_student_answers import (
+    evaluation_strictness_instruction,
+    format_answer_model_as_teacher_instructions,
+)
 from src.grid_overlay import batch_draw_grid
 
-from .classify import classify_and_annotate_page
-from .config import (
-    DEFAULT_CLASSIFY_WAIT_TIMEOUT_S,
-    REMARK_ANSWER_GUARD_PCT,
-    SMART_OCR_TOTAL_TIMEOUT_S,
-    STRUCTURE_MAX_OUTPUT_TOKENS,
-)
-from .dedup import deduplicate_page_texts, extract_page_body
-from .layout import (
-    annotations_grid_to_pct,
-    clip_marks_to_answer,
-    nudge_mark_past_remarks,
-    spread_remarks_two_column,
-)
-from .ocr import ocr_single_page
-from .structure import estimate_expected_questions, structure_qa_with_fallback
+from .config import SMART_OCR_TOTAL_TIMEOUT_S
+from .dedup import deduplicate_page_texts
+from .step2_page import extract_page
+from .step3_mark import mark_item
+from .structure import merge_per_page_questions
 
 log = logging.getLogger(__name__)
 
 
-def smart_ocr_extract_student_answers(
+def smart_ocr_run(
     pdf_path: Path,
     api_key: str,
     language: str,
+    answer_model: dict[str, Any],
+    check_level: str,
     *,
     request_id: str,
 ) -> dict[str, Any]:
-    """Classify pages → type-aware OCR → dedupe → structure into items.
+    """End-to-end smart OCR. Returns ``{items, page_count, skipped_pages}``."""
+    run_started = time.monotonic()
+    log.info("smart_ocr[%s] START", request_id)
 
-    Cover / intro segregation is performed in the Stage 2 structure pass — not here.
-    """
+    # ---------- Step 1: grid overlay ----------
     total_pages = count_pdf_pages(pdf_path)
     if total_pages < 1:
         raise ValueError("PDF has no pages.")
@@ -81,165 +73,181 @@ def smart_ocr_extract_student_answers(
             f"PDF has {total_pages} page(s); maximum allowed is {max_pages} (COPY_OCR_MAX_PAGES)."
         )
 
-    # OCR quality needs 300 DPI; grid overlay works at any DPI.
     dpi = max(300, copy_ocr_raster_dpi())
+    raster_started = time.monotonic()
     png_pages = rasterize_pdf_to_png_pages(pdf_path, dpi=dpi, request_id=request_id)
-    max_workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
+    raster_elapsed = time.monotonic() - raster_started
 
-    grid_pages = batch_draw_grid(png_pages, max_workers=max_workers)
-    log.info("smart_ocr[%s] grid overlay drawn dpi=%s pages=%s", request_id, dpi, total_pages)
+    workers = max(1, min(copy_ocr_parallel_workers(), total_pages))
 
-    # --- Stage 1 (parallel) ---------------------------------------------------------
-    page_blocks: list[str] = [""] * total_pages
-    page_anchor_marks: list[list[dict[str, Any]]] = [[] for _ in range(total_pages)]
-    page_remarks: list[list[dict[str, Any]]] = [[] for _ in range(total_pages)]
-    classifications: list[str] = ["UNKNOWN"] * total_pages
-    classify_events: list[threading.Event] = [threading.Event() for _ in range(total_pages)]
-
-    def _classify_annotate_job(idx: int) -> tuple[int, dict[str, Any]]:
-        pno = idx + 1
-        try:
-            result = classify_and_annotate_page(
-                api_key, grid_pages[idx], pno, total_pages, language
-            )
-            classifications[idx] = result["page_type"]
-            log.info(
-                "smart_ocr[%s] classify+annotate page=%s/%s type=%s anchors=%s remarks=%s",
-                request_id, pno, total_pages, result["page_type"],
-                len(result["anchor_marks"]), len(result["remarks"]),
-            )
-        except Exception as e:
-            log.warning("smart_ocr[%s] classify+annotate failed page=%s: %s", request_id, pno, e)
-            result = {"page_type": "UNKNOWN", "anchor_marks": [], "remarks": []}
-            classifications[idx] = "UNKNOWN"
-        finally:
-            classify_events[idx].set()
-        return idx, result
-
-    def _ocr_job(idx: int) -> tuple[int, str]:
-        pno = idx + 1
-        # Wait for classification so DUPLICATE pages can skip the OCR Gemini call.
-        classify_events[idx].wait(timeout=DEFAULT_CLASSIFY_WAIT_TIMEOUT_S)
-        pt = classifications[idx]
-        if pt == "DUPLICATE" and idx > 0:
-            header = f"=== PAGE {pno} ==="
-            block = (
-                f"{header}\n[OMITTED: page classified DUPLICATE — duplicate of earlier sheet; "
-                f"OCR skipped to save tokens.]\n"
-            )
-            log.info("smart_ocr[%s] ocr page=%s DUPLICATE skipped", request_id, pno)
-            return idx, block
-        block = ocr_single_page(api_key, png_pages[idx], pno, total_pages, language, pt)
-        log.info(
-            "smart_ocr[%s] ocr page=%s/%s class=%s chars=%s",
-            request_id, pno, total_pages, pt, len(block),
-        )
-        return idx, block
-
-    # 2× workers: N classify+annotate + N OCR jobs share one pool.
-    # Whole-request wall-clock guard: as_completed(timeout=) raises
-    # concurrent.futures.TimeoutError if the deadline elapses, which main.py
-    # maps to HTTP 504.
-    deadline = time.monotonic() + SMART_OCR_TOTAL_TIMEOUT_S
-    with ThreadPoolExecutor(max_workers=max_workers * 2) as pool:
-        cls_ann_futs = [pool.submit(_classify_annotate_job, i) for i in range(total_pages)]
-        ocr_futs     = [pool.submit(_ocr_job, i) for i in range(total_pages)]
-        for fut in as_completed(cls_ann_futs, timeout=max(1.0, deadline - time.monotonic())):
-            idx, result = fut.result()
-            anchors_pct, remarks_pct = annotations_grid_to_pct(
-                result["anchor_marks"], result["remarks"], idx + 1
-            )
-            page_anchor_marks[idx] = anchors_pct
-            page_remarks[idx] = spread_remarks_two_column(remarks_pct, page_num=idx + 1)
-        for fut in as_completed(ocr_futs, timeout=max(1.0, deadline - time.monotonic())):
-            idx, block = fut.result()
-            page_blocks[idx] = block
-
-    # Page-similarity dedup (text-only).
-    page_blocks = deduplicate_page_texts(page_blocks, classifications, request_id)
+    grid_started = time.monotonic()
+    grid_pages = batch_draw_grid(png_pages, max_workers=workers)
+    grid_elapsed = time.monotonic() - grid_started
     log.info(
-        "smart_ocr[%s] after ocr+dedup total_chars=%s",
-        request_id, sum(len(b) for b in page_blocks),
+        "smart_ocr[%s] step1 done dpi=%s pages=%s raster=%.2fs grid=%.2fs",
+        request_id, dpi, total_pages, raster_elapsed, grid_elapsed,
     )
 
-    # --- Stage 2 (structure) --------------------------------------------------------
-    pages_payload = {"pages": []}
+    deadline = run_started + SMART_OCR_TOTAL_TIMEOUT_S
+
+    # ---------- Step 2: parallel per-page OCR + Q&A ----------
+    step2_started = time.monotonic()
+    per_page: list[dict[str, Any]] = [
+        {"text": "", "is_intro": False, "questions": []} for _ in range(total_pages)
+    ]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {
+            pool.submit(
+                extract_page, api_key, grid_pages[i], i + 1, total_pages, language,
+                is_first_page=(i == 0),
+            ): i
+            for i in range(total_pages)
+        }
+        for fut, i in futs.items():
+            remaining = max(1.0, deadline - time.monotonic())
+            try:
+                per_page[i] = fut.result(timeout=remaining)
+            except Exception as e:
+                log.warning(
+                    "smart_ocr[%s] step2 page=%s failed: %s",
+                    request_id, i + 1, e,
+                )
+
+    skipped_pages: list[int] = []
+    if per_page and per_page[0].get("is_intro"):
+        log.info("smart_ocr[%s] page 1 classified intro/cover — skipping", request_id)
+        skipped_pages.append(1)
+        per_page[0] = {"text": "", "is_intro": True, "questions": []}
+
+    # Optional similarity-dedup of OCR text (cheap, drops near-identical pages).
+    page_blocks = [
+        f"=== PAGE {i + 1} ===\n{p.get('text', '')}" for i, p in enumerate(per_page)
+    ]
+    page_blocks = deduplicate_page_texts(
+        page_blocks, ["UNKNOWN"] * total_pages, request_id,
+    )
+    # Reflect dedup back onto per_page text (empties duplicates so step 3 won't see them).
     for i, block in enumerate(page_blocks):
-        pages_payload["pages"].append({"page": i + 1, "text": extract_page_body(block)})
-    pages_payload_json = json.dumps(pages_payload, ensure_ascii=False)
-    payload_tokens_est = len(pages_payload_json) // 4
-    expected_questions = estimate_expected_questions(page_blocks)
+        if "[OMITTED:" in block:
+            per_page[i] = {"text": "", "is_intro": per_page[i].get("is_intro", False), "questions": []}
+
+    items = merge_per_page_questions(per_page, total_pages)
+    step2_elapsed = time.monotonic() - step2_started
     log.info(
-        "smart_ocr[%s] structure input_tokens_est=%s output_cap=%s expected_questions=%s",
-        request_id, payload_tokens_est, STRUCTURE_MAX_OUTPUT_TOKENS, expected_questions,
+        "smart_ocr[%s] step2 END pages=%s items=%s skipped=%s took=%.2fs",
+        request_id, total_pages, len(items), skipped_pages, step2_elapsed,
     )
 
-    structure_client = genai.Client(api_key=api_key)
-    rows = structure_qa_with_fallback(
-        structure_client,
-        pages_payload,
-        language,
-        total_pages,
-        expected_questions=expected_questions,
+    if not items:
+        raise ValueError("No answerable content detected.")
+
+    # ---------- Step 3: per-question-id parallel marking ----------
+    step3_started = time.monotonic()
+    subject = (answer_model.get("title") or "General").strip() or "General"
+    model_questions = answer_model.get("questions") or []
+    teacher_instructions = format_answer_model_as_teacher_instructions(
+        model_questions, subject,
     )
+    strictness_line = evaluation_strictness_instruction(check_level)
+    model_by_qid = _build_model_lookup(model_questions)
+
+    item_qids = [it.get("question_id") for it in items]
     log.info(
-        "smart_ocr[%s] stage3 structure complete questions=%s",
-        request_id, len(rows),
+        "smart_ocr[%s] step3 START model_questions=%s model_qids=%s item_qids=%s",
+        request_id,
+        len(model_questions),
+        sorted(model_by_qid.keys()),
+        item_qids,
     )
 
-    # --- Merge per-page anchor_marks + remarks into items ---------------------------
-    all_anchors: list[dict[str, Any]] = []
-    all_remarks: list[dict[str, Any]] = []
-    for idx in range(total_pages):
-        all_anchors.extend(page_anchor_marks[idx])
-        all_remarks.extend(page_remarks[idx])
-
-    for item in rows:
-        sp  = int(item.get("start_page", 1))
-        ep  = int(item.get("end_page", sp))
-        sy  = float(item.get("start_y_position_percent", 0.0))
-        ey  = float(item.get("end_y_position_percent", 100.0))
-        qid = item.get("question_id", "?")
-
-        page_spans: list[str] = []
-        for pg in range(sp, ep + 1):
-            if sp == ep:
-                page_spans.append(f"p{pg}[y{sy:.0f}-{ey:.0f}%]")
-            elif pg == sp:
-                page_spans.append(f"p{pg}[y{sy:.0f}-100%]")
-            elif pg == ep:
-                page_spans.append(f"p{pg}[y0-{ey:.0f}%]")
-            else:
-                page_spans.append(f"p{pg}[y0-100%]")
-        log.info("item[q%s] bbox  %s", qid, " ".join(page_spans))
-
-        item["anchor_marks"] = clip_marks_to_answer(
-            all_anchors, sp, ep, sy, ey, y_key="cy_pct"
+    def _job(item: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        qid = item.get("question_id")
+        start_page = int(item.get("start_page", 1))
+        end_page = int(item.get("end_page", start_page))
+        item_pages = list(range(start_page, end_page + 1))
+        grid_subset = [grid_pages[p - 1] for p in item_pages]
+        entry = model_by_qid.get(qid)
+        marked = mark_item(
+            api_key, item, grid_subset, entry,
+            subject=subject,
+            teacher_instructions=teacher_instructions,
+            check_level=check_level,
+            strictness_line=strictness_line,
+            language=language,
+            request_id=request_id,
         )
-        # Push effective start_y past the printed question-text zone so remarks
-        # within REMARK_ANSWER_GUARD_PCT of start_y don't land on the header.
-        remark_sy = min(sy + REMARK_ANSWER_GUARD_PCT, ey)
-        item["remarks"] = clip_marks_to_answer(
-            all_remarks, sp, ep, remark_sy, ey, y_key="center"
-        )
+        return qid, marked
 
-        log.info(
-            "item[q%s] anchors=%s",
-            qid,
-            " ".join(
-                f"p{a['page']}({a['type']}cy={a.get('cy_pct',0):.0f}%)"
-                for a in item["anchor_marks"]
-            ) or "(none)",
-        )
-        log.info(
-            "item[q%s] remarks=%s",
-            qid,
-            " ".join(
-                f"p{r['page']}y[{r.get('y1_pct',0):.0f}-{r.get('y2_pct',0):.0f}%]"
-                for r in item["remarks"]
-            ) or "(none)",
-        )
+    marked_by_qid: dict[Any, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_job, it): it.get("question_id") for it in items}
+        for fut, qid in futs.items():
+            remaining = max(1.0, deadline - time.monotonic())
+            try:
+                returned_qid, marked = fut.result(timeout=remaining)
+                marked_by_qid[returned_qid] = marked
+            except Exception as e:
+                log.warning(
+                    "smart_ocr[%s] step3 q=%s failed: %s",
+                    request_id, qid, e,
+                )
 
-        nudge_mark_past_remarks(item)
+    items = [marked_by_qid.get(it.get("question_id"), it) for it in items]
+    step3_elapsed = time.monotonic() - step3_started
+    log.info(
+        "smart_ocr[%s] step3 END items=%s took=%.2fs",
+        request_id, len(items), step3_elapsed,
+    )
 
-    return {"items": rows, "page_count": total_pages}
+    total_elapsed = time.monotonic() - run_started
+    log.info(
+        "smart_ocr[%s] DONE step1=%.2fs step2=%.2fs step3=%.2fs total=%.2fs items=%s pages=%s skipped=%s",
+        request_id,
+        raster_elapsed + grid_elapsed, step2_elapsed, step3_elapsed, total_elapsed,
+        len(items), total_pages, skipped_pages,
+    )
+
+    return {
+        "items": items,
+        "page_count": total_pages,
+        "skipped_pages": skipped_pages,
+    }
+
+
+_DIGIT_RE = re.compile(r"\d+")
+
+
+def _build_model_lookup(model_questions: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Index model questions by the integer parsed out of ``questionNo``.
+
+    Model storage writes ``questionNo`` as ``"Q1"``, ``"Q2"``, … (via service.py).
+    We strip the ``Q`` prefix and any whitespace before parsing so the lookup
+    matches step-2 / step-3 integer ``question_id`` values.
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for idx, q in enumerate(model_questions or [], start=1):
+        if not isinstance(q, dict):
+            continue
+        # Try the explicit number fields first, in order of canonicity.
+        raw_candidates = (
+            q.get("questionNo"),
+            q.get("question_no"),
+            q.get("question_id"),
+        )
+        qid_int: int | None = None
+        for raw in raw_candidates:
+            if raw is None:
+                continue
+            m = _DIGIT_RE.search(str(raw))
+            if m:
+                try:
+                    qid_int = int(m.group(0))
+                    break
+                except ValueError:
+                    continue
+        # Fallback: use the position (1-based) when the entry has no parseable label.
+        if qid_int is None:
+            qid_int = idx
+        if qid_int not in out:
+            out[qid_int] = q
+    return out

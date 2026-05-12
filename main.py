@@ -38,14 +38,8 @@ from src.gemini_copy_ocr import (
     ocr_essay_copy_pdf,
     ocr_essay_copy_pdf_rasterized,
 )
-from src.gemini_smart_ocr import enrich_remarks_from_annotations, smart_ocr_extract_student_answers
-from src.gemini_evaluate_student_answers import (
-    evaluate_student_answers_against_model,
-    format_answer_model_as_teacher_instructions,
-    merge_evaluations_into_items,
-    normalize_evaluation_check_level,
-    student_items_for_grading,
-)
+from src.gemini_smart_ocr import smart_ocr_run
+from src.gemini_evaluate_student_answers import normalize_evaluation_check_level
 from src.gemini_expand_model_answer import expand_model_answer
 from src.gemini_extract import load_api_key, process_pdf_path
 from src.free_space_service import (
@@ -1374,32 +1368,22 @@ async def post_analyse_smart_ocr(
     model_id: str = Form("", alias="modelId"),
     check_level: str = Form("Moderate", alias="checkLevel"),
 ) -> JSONResponse:
-    """Extracts question-wise answers and marking coordinates from a PDF.
+    """Three-step smart-OCR: grid → parallel OCR+Q&A → per-question marking.
 
-    Each page is rasterized, overlaid with a 50×50 reference grid, and sent to
-    Gemini in a single unified call that simultaneously classifies the page type,
-    performs OCR, and identifies visual annotation spots.  Each item in the
-    response therefore includes two extra fields:
+    * Step 1 (image-only): rasterize at 300 DPI, composite a 50×50 reference grid.
+    * Step 2 (one Gemini call per page, in parallel): OCR + per-page Q&A records
+      with intro detection on page 1.
+    * Step 3 (one Gemini call per ``question_id``, in parallel): grading +
+      remarking + anchor remarking against the stored model answer key.
 
-    - ``anchor_marks``: list of typed teacher markup spots (circle / ellipse /
-      underline / tick) with ``page``, ``cx_pct``, ``cy_pct``, ``rx_pct``,
-      ``ry_pct`` in percentage coordinates.
-    - ``remarks``: list of free-whitespace bounding boxes (``page``, ``x1_pct``,
-      ``y1_pct``, ``x2_pct``, ``y2_pct``) suitable for written teacher comments.
+    ``modelId`` is REQUIRED — HTTP 400 if missing or unknown. ``checkLevel``
+    (``Moderate`` | ``Hard``) controls grading strictness.
 
-    All coordinates are page percentages 0–100 derived from the 50-point grid
-    (grid point 1 → 0 %, grid point 50 → 98 %, natural ~2 % margin at right/bottom).
-
-    If modelId is provided, also runs Stage 3 grading against the stored answer
-    model and merges marks, status, feedback, and annotations into each object
-    in ``items`` (same ``question_id``). Intro/cover pages are segregated in the
-    structure (phase 2) pass, not via extra API parameters.
-
-    Optional Form field ``checkLevel`` (``Moderate`` | ``Hard``) controls evaluator
-    strictness when grading with ``modelId`` — matches Flutter ``checkLevel``.
-
-    Response includes ``skippedPages``: 1-based page indexes not covered by any
-    structured question row (typically intro/cover sheets).
+    Each item carries: ``question_id``, ``question``, ``student_answer``,
+    page bounds, ``anchor_marks``, ``remarks``, ``annotations``, plus grading
+    fields ``max_marks``, ``marks_awarded``, ``status``, ``feedback``,
+    ``student_answer_summary``. ``skippedPages`` is the union of intro pages
+    detected in step 2 and any pages uncovered by structured rows.
     """
     user, auth_err = _require_auth_user(request)
     if auth_err:
@@ -1433,31 +1417,31 @@ async def post_analyse_smart_ocr(
 
     rid = str(uuid.uuid4())
     mid = model_id.strip()
+    t_request_started = time.monotonic()
+
+    if not mid:
+        return JSONResponse(_err("modelId is required."), status_code=400)
 
     log.info(
-        "analyse/smart-ocr start request_id=%s user_id=%s filename=%r bytes=%s "
+        "analyse/smart-ocr START request_id=%s user_id=%s filename=%r bytes=%s "
         "model_id=%r check_level=%s",
         rid,
         user.get("id"),
         file.filename,
         len(raw),
-        mid or "(none)",
+        mid,
         check_canon,
     )
 
-    # --- Validate model early (before burning OCR tokens) ---
-    answer_model: dict | None = None
-    if mid:
-        answer_model = get_answer_model(mid, user["id"])
-        if not answer_model:
-            return JSONResponse(_err("Model not found."))
+    answer_model = get_answer_model(mid, user["id"])
+    if not answer_model:
+        return JSONResponse(_err("Model not found."), status_code=400)
 
     try:
         api_key = load_api_key()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
 
-    # --- Stage 1+2: OCR + structure ---
     tmp: Path | None = None
     try:
         fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
@@ -1465,10 +1449,12 @@ async def post_analyse_smart_ocr(
         with os.fdopen(fd, "wb") as out:
             out.write(raw)
         result = await asyncio.to_thread(
-            smart_ocr_extract_student_answers,
+            smart_ocr_run,
             tmp,
             api_key,
             lang,
+            answer_model,
+            check_canon,
             request_id=rid,
         )
     except concurrent.futures.TimeoutError:
@@ -1492,84 +1478,37 @@ async def post_analyse_smart_ocr(
 
     page_count = result.get("page_count")
     items = result.get("items", [])
+    pipeline_skipped = list(result.get("skipped_pages", []) or [])
+
     if not isinstance(page_count, int) or page_count < 1:
         log.error(
             "analyse/smart-ocr invalid result request_id=%s page_count=%r",
-            rid,
-            page_count,
+            rid, page_count,
         )
         return JSONResponse(_err("AI service error: invalid OCR page count."), status_code=500)
     if not isinstance(items, list):
         log.error(
-            "analyse/smart-ocr invalid result request_id=%s items_type=%s",
-            rid,
-            type(items).__name__,
+            "analyse/smart-ocr invalid items request_id=%s items_type=%s",
+            rid, type(items).__name__,
         )
         return JSONResponse(_err("AI service error: invalid OCR items."), status_code=500)
 
-    log.info(
-        "analyse/smart-ocr ocr+structure ok request_id=%s page_count=%s item_count=%s",
-        rid,
-        page_count,
-        len(items),
+    skipped_pages = sorted(
+        set(pipeline_skipped) | set(_smart_ocr_skipped_pages(page_count, items))
     )
-
-    # --- Stage 3: grading (only when modelId provided) ---
-    if answer_model:
-        try:
-            questions = answer_model.get("questions") or []
-            title = answer_model.get("title") or "General"
-            teacher_instructions = format_answer_model_as_teacher_instructions(
-                questions, title
-            )
-            items_to_grade = student_items_for_grading(items)
-            ev_list = await asyncio.to_thread(
-                evaluate_student_answers_against_model,
-                api_key,
-                title,
-                teacher_instructions,
-                items_to_grade,
-                request_id=rid,
-                check_level=check_canon,
-            )
-            items = merge_evaluations_into_items(items, ev_list)
-            enrich_remarks_from_annotations(items)
-            log.info(
-                "analyse/smart-ocr eval ok request_id=%s model_id=%s merged_items=%s",
-                rid,
-                mid,
-                len(items),
-            )
-        except Exception as e:
-            log.exception(
-                "analyse/smart-ocr eval failed request_id=%s model_id=%s", rid, mid
-            )
-            # Don't fail the whole response — return OCR items with error note
-            return JSONResponse(
-                _ok(
-                    "Smart OCR complete. Grading failed.",
-                    pageCount=page_count,
-                    items=items,
-                    modelId=mid,
-                    checkLevel=check_canon,
-                    gradingError=str(e),
-                    skippedPages=_smart_ocr_skipped_pages(page_count, items),
-                )
-            )
-
-    # --- Build response ---
-    extra: dict = {"checkLevel": check_canon}
-    if mid:
-        extra["modelId"] = mid
-    skipped_pages = _smart_ocr_skipped_pages(page_count, items)
-
+    t_total = time.monotonic() - t_request_started
+    log.info(
+        "analyse/smart-ocr TIMING request_id=%s total=%.2fs pages=%s items=%s status=ok",
+        rid, t_total, page_count, len(items),
+    )
     return JSONResponse(
         _ok(
             "Smart OCR complete.",
             pageCount=page_count,
             items=items,
             skippedPages=skipped_pages,
-            **extra,
+            modelId=mid,
+            checkLevel=check_canon,
         )
     )
 

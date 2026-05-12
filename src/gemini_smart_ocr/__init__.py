@@ -1,20 +1,16 @@
-"""Smart OCR pipeline — public API.
+"""Smart-OCR pipeline — public API.
 
-Three Gemini stages composed into one orchestrator:
+Three-step pipeline:
 
-  1. ``classify_and_annotate_page`` — classify page type + place anchor/remark marks.
-  2. ``ocr_single_page``            — type-aware OCR of the handwriting.
-  3. ``structure_qa_with_fallback`` — flatten OCR text into question rows.
+  * Step 1 — grid overlay (image-only, no Gemini).
+  * Step 2 — parallel per-page OCR + Q&A extraction (intro flag on page 1) → items[].
+  * Step 3 — per-question-id parallel marking against the model answer key.
 
-External callers should only import:
-  - :func:`smart_ocr_extract_student_answers` — full PDF → items + page_count.
-  - :func:`enrich_remarks_from_annotations`   — merge grading feedback into remarks.
+External callers should only import :func:`smart_ocr_run`.
 """
 
-from .enrich import enrich_remarks_from_annotations
-from .pipeline import smart_ocr_extract_student_answers
+from .pipeline import smart_ocr_run
+from .step2_page import extract_page
+from .step3_mark import mark_item
 
-__all__ = [
-    "smart_ocr_extract_student_answers",
-    "enrich_remarks_from_annotations",
-]
+__all__ = ["smart_ocr_run", "extract_page", "mark_item"]
