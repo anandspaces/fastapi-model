@@ -86,13 +86,25 @@ def build_step3_item_prompt(
     valid_pages: list[int],
     check_level: str,
     strictness_line: str,
+    has_model_entry: bool = True,
 ) -> str:
     lang = (language or "en").strip().lower()
-    script_note = (
-        "Comments may be in Hindi or English; preserve student wording verbatim in summaries."
-        if lang == "hi"
-        else "Comments should be in concise English unless the student wrote in Hindi."
-    )
+    if lang == "hi":
+        script_note = (
+            "LANGUAGE — MANDATORY: Write EVERY textual output field "
+            "(`feedback`, `student_answer_summary`, every `remarks[].comment`, "
+            "and every `annotations[].comment`) in HINDI using DEVANAGARI script. "
+            "Do NOT write any of these fields in English, Hinglish, or transliterated "
+            "Roman script. The only English values allowed are the enum `status` "
+            "keywords (correct/partial/wrong/unattempted) and numeric fields. "
+            "Preserve any verbatim student wording (already in Hindi) exactly."
+        )
+    else:
+        script_note = (
+            "LANGUAGE — Write `feedback`, `student_answer_summary`, every "
+            "`remarks[].comment`, and every `annotations[].comment` in concise "
+            "English. Preserve student wording verbatim in summaries when quoting."
+        )
     qid = item.get("question_id", "?")
     qtext = (item.get("question") or "").strip()
     sans = (item.get("student_answer") or "").strip() or "[BLANK]"
@@ -102,14 +114,28 @@ def build_step3_item_prompt(
     ey = float(item.get("end_y_position_percent", 100.0))
     pages_csv = ", ".join(str(p) for p in valid_pages)
 
+    teacher_block = (
+        f"TEACHER MODEL ANSWER + INSTRUCTIONS (the source of truth — use this to grade "
+        f"and to ground every comment in what is missing / wrong / well done):\n"
+        f"{teacher_instructions}"
+        if has_model_entry
+        else (
+            "TEACHER MODEL ANSWER + INSTRUCTIONS — NONE PROVIDED for this question. "
+            "Treat the student's answer on its own merits: judge clarity, structure, "
+            "factual accuracy against general UPSC subject knowledge, examples, and "
+            "balance. Still emit anchor_marks, remarks, and annotations across every "
+            "page that contains student handwriting. Set ``max_marks`` to 0 and "
+            "``marks_awarded`` to 0; in ``feedback`` note that no specific model "
+            "answer was available and provide a general critique."
+        )
+    )
+
     return f"""You are an expert UPSC examiner marking ONE answer. {strictness_line}
 
 SUBJECT: {subject}
 CHECK LEVEL: {check_level}
 
-TEACHER MODEL ANSWER + INSTRUCTIONS (the source of truth — use this to grade and to
-ground every comment in what is missing / wrong / well done):
-{teacher_instructions}
+{teacher_block}
 
 THIS QUESTION (Q{qid}):
 {qtext or '[no printed question text captured]'}
@@ -141,16 +167,20 @@ OUTPUT EXACTLY ONE JSON OBJECT MATCHING THE SCHEMA, WITH THESE PARTS:
      ticks, or near the end of an answer line (cx ∈ [30, 36]). rx = ry = 0.
    - ELLIPSE around a 2–4 word correct phrase. cx ∈ [8, 34], ry ≤ 1 (tight horizontal).
 
-3) REMARKS (one per non-trivial body band):
+3) REMARKS (MANDATORY: at least 2–4 remarks PER PAGE that contains student
+   handwriting — never leave a written page without any remark):
    - Place ONLY in free zones:
      * RIGHT margin : x1=39, x2=49, height 2–3 grid rows (use for odd-numbered bands).
      * LEFT margin  : x1=1,  x2=11, height 2–3 grid rows (use for even-numbered bands).
      * INLINE GAP   : x1=5,  x2=37, spanning a blank gap between two content bands.
    - 9 ≤ y1, y2 ≤ 45. NEVER overlap a content band (margin strips excepted).
-   - ``comment`` is a model-answer-grounded teacher note (≤ ~20 words) — for example
-     "Missing 'Categorical Imperative' from model answer." or "Good linkage to Sarvodaya."
-     Empty string only for pure visual underline-arrow boxes with no text.
+   - ``comment`` is a teacher note (≤ ~20 words). If a model answer is supplied,
+     ground each comment in what is missing / wrong / well done versus the model;
+     otherwise critique the student's reasoning, structure, examples, or accuracy
+     in general. Empty string only for pure visual underline-arrow boxes.
    - Page rule: place the remark on the SAME page as the student writing it refers to.
+   - Coverage rule: every page in the valid page list that contains handwriting MUST
+     receive both anchor marks AND remarks. Do not skip pages.
 
 4) ANNOTATIONS — mirror your remarks for the frontend. For each remark you emit, also
    emit one annotation: ``page_index = page - 1`` (zero-based), ``y_position_percent``

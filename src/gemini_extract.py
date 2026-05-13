@@ -87,6 +87,28 @@ def load_api_key() -> str:
     return key
 
 
+def load_api_keys() -> list[str]:
+    """Return the pool of Gemini API keys for round-robin parallel calls.
+
+    Reads ``GEMINI_API_KEY`` (required) and any of ``GEMINI_API_KEY_2`` through
+    ``GEMINI_API_KEY_5`` (optional). Returns the keys in declaration order,
+    deduplicated. Pipeline callers round-robin across the returned list so
+    concurrent calls hit different projects and split the per-key rate budget.
+    """
+    load_dotenv()
+    primary = os.getenv("GEMINI_API_KEY", "").strip()
+    if not primary:
+        raise ValueError("GEMINI_API_KEY is not set. Add it to a .env file or environment.")
+    keys: list[str] = [primary]
+    seen = {primary}
+    for n in range(2, 6):
+        extra = os.getenv(f"GEMINI_API_KEY_{n}", "").strip()
+        if extra and extra not in seen:
+            keys.append(extra)
+            seen.add(extra)
+    return keys
+
+
 def wait_for_file_active(
     client: genai.Client, file: types.File, timeout: int = FILE_ACTIVE_TIMEOUT
 ) -> types.File:

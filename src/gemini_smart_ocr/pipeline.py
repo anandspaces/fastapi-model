@@ -52,14 +52,25 @@ log = logging.getLogger(__name__)
 
 def smart_ocr_run(
     pdf_path: Path,
-    api_key: str,
+    api_key: str | list[str],
     language: str,
     answer_model: dict[str, Any],
     check_level: str,
     *,
     request_id: str,
 ) -> dict[str, Any]:
-    """End-to-end smart OCR. Returns ``{items, page_count, skipped_pages}``."""
+    """End-to-end smart OCR. Returns ``{items, page_count, skipped_pages}``.
+
+    ``api_key`` can be a single string (legacy) or a list of strings. When a list
+    is passed, per-page (step 2) and per-question (step 3) submissions
+    round-robin across the keys to split the per-key rate budget.
+    """
+    api_keys: list[str] = (
+        [k for k in api_key if k] if isinstance(api_key, list) else [api_key]
+    )
+    if not api_keys:
+        raise ValueError("smart_ocr_run requires at least one API key.")
+    log.info("smart_ocr[%s] api_keys=%s", request_id, len(api_keys))
     run_started = time.monotonic()
     log.info("smart_ocr[%s] START", request_id)
 
@@ -98,7 +109,9 @@ def smart_ocr_run(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {
             pool.submit(
-                extract_page, api_key, grid_pages[i], i + 1, total_pages, language,
+                extract_page,
+                api_keys[i % len(api_keys)],
+                grid_pages[i], i + 1, total_pages, language,
                 is_first_page=(i == 0),
             ): i
             for i in range(total_pages)
@@ -160,15 +173,19 @@ def smart_ocr_run(
         item_qids,
     )
 
-    def _job(item: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    def _job(item: dict[str, Any], job_index: int) -> tuple[Any, dict[str, Any]]:
         qid = item.get("question_id")
         start_page = int(item.get("start_page", 1))
         end_page = int(item.get("end_page", start_page))
         item_pages = list(range(start_page, end_page + 1))
         grid_subset = [grid_pages[p - 1] for p in item_pages]
         entry = model_by_qid.get(qid)
+        # Rotate the key list so this item's per-page fallback (if any) starts on
+        # a different key than the item's primary call — keeps load balanced
+        # across keys when one item is a long essay.
+        rotated_keys = api_keys[job_index % len(api_keys):] + api_keys[:job_index % len(api_keys)]
         marked = mark_item(
-            api_key, item, grid_subset, entry,
+            rotated_keys, item, grid_subset, entry,
             subject=subject,
             teacher_instructions=teacher_instructions,
             check_level=check_level,
@@ -180,7 +197,7 @@ def smart_ocr_run(
 
     marked_by_qid: dict[Any, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_job, it): it.get("question_id") for it in items}
+        futs = {pool.submit(_job, it, idx): it.get("question_id") for idx, it in enumerate(items)}
         for fut, qid in futs.items():
             remaining = max(1.0, deadline - time.monotonic())
             try:
@@ -192,7 +209,28 @@ def smart_ocr_run(
                     request_id, qid, e,
                 )
 
-    items = [marked_by_qid.get(it.get("question_id"), it) for it in items]
+    def _ensure_shell(it: dict[str, Any]) -> dict[str, Any]:
+        marked = marked_by_qid.get(it.get("question_id"))
+        if marked is not None:
+            return marked
+        # Step-3 future failed (timeout / exception). Fill an empty shell so the
+        # response is structurally consistent across items.
+        entry = model_by_qid.get(it.get("question_id"))
+        try:
+            cap = float(entry.get("marks", 0)) if isinstance(entry, dict) else 0.0
+        except (TypeError, ValueError):
+            cap = 0.0
+        it.setdefault("max_marks", cap)
+        it.setdefault("marks_awarded", 0.0)
+        it.setdefault("status", "partial")
+        it.setdefault("feedback", "Grading failed (timeout or transient error); please re-run.")
+        it.setdefault("student_answer_summary", "")
+        it.setdefault("anchor_marks", [])
+        it.setdefault("remarks", [])
+        it.setdefault("annotations", [])
+        return it
+
+    items = [_ensure_shell(it) for it in items]
     step3_elapsed = time.monotonic() - step3_started
     log.info(
         "smart_ocr[%s] step3 END items=%s took=%.2fs",
@@ -207,11 +245,52 @@ def smart_ocr_run(
         len(items), total_pages, skipped_pages,
     )
 
+    _truncate_student_answers_for_response(items)
+
     return {
         "items": items,
         "page_count": total_pages,
         "skipped_pages": skipped_pages,
     }
+
+
+_RESPONSE_STUDENT_ANSWER_MAX_CHARS_DEFAULT = 4000
+
+
+def _response_student_answer_max_chars() -> int:
+    import os
+    try:
+        return max(0, int(os.environ.get(
+            "SMART_OCR_RESPONSE_STUDENT_ANSWER_MAX_CHARS",
+            _RESPONSE_STUDENT_ANSWER_MAX_CHARS_DEFAULT,
+        )))
+    except ValueError:
+        return _RESPONSE_STUDENT_ANSWER_MAX_CHARS_DEFAULT
+
+
+def _truncate_student_answers_for_response(items: list[dict[str, Any]]) -> None:
+    """Cap ``student_answer`` on the outbound response only.
+
+    The full text was already sent to Gemini in step 2 → step 3 (so grading
+    context is preserved); this only shortens the JSON we hand back to the
+    client. ``0`` disables truncation. Truncation keeps the head + tail with a
+    middle ellipsis so first paragraph and conclusion are both visible.
+    """
+    cap = _response_student_answer_max_chars()
+    if cap <= 0:
+        return
+    for it in items:
+        text = it.get("student_answer") or ""
+        if len(text) <= cap:
+            continue
+        head_n = cap // 2
+        tail_n = cap - head_n
+        head = text[:head_n].rstrip()
+        tail = text[-tail_n:].lstrip()
+        it["student_answer"] = (
+            f"{head}\n\n[…truncated for response: {len(text)} chars total, "
+            f"showing first {head_n} + last {tail_n}…]\n\n{tail}"
+        )
 
 
 _DIGIT_RE = re.compile(r"\d+")

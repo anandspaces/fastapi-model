@@ -41,7 +41,7 @@ from src.gemini_copy_ocr import (
 from src.gemini_smart_ocr import smart_ocr_run
 from src.gemini_evaluate_student_answers import normalize_evaluation_check_level
 from src.gemini_expand_model_answer import expand_model_answer
-from src.gemini_extract import load_api_key, process_pdf_path
+from src.gemini_extract import load_api_key, load_api_keys, process_pdf_path
 from src.free_space_service import (
     analyze_pdf_free_space,
     api_response_to_page_zones,
@@ -1401,9 +1401,23 @@ async def post_analyse_smart_ocr(
             _err('checkLevel must be "Moderate" or "Hard" (camelCase form field checkLevel).')
         )
 
-    lang = language.strip().lower()
+    # Language resolution: form value wins ONLY if explicitly "hi"; otherwise derive
+    # from the model's ``lang`` so a Hindi answer key forces Hindi remarks even when
+    # the frontend defaults the form field to "en".
+    raw_lang = language.strip().lower()
+    if raw_lang == "hi":
+        lang = "hi"
+    else:
+        lang, lang_err = _resolve_copy_ocr_language(
+            "" if raw_lang in ("", "en") else raw_lang,
+            model_id,
+            str(user["id"]),
+        )
+        if lang_err:
+            return lang_err
     if not _valid_lang(lang):
         return JSONResponse(_err("language must be en or hi"))
+    log.info("analyse/smart-ocr language resolved form=%r model=%r → %s", raw_lang, model_id, lang)
     if not _is_pdf(file.filename, file.content_type):
         return JSONResponse(_err("file must be a PDF."))
 
@@ -1444,7 +1458,7 @@ async def post_analyse_smart_ocr(
         return JSONResponse(_err("Model not found."), status_code=400)
 
     try:
-        api_key = load_api_key()
+        api_keys = load_api_keys()
     except ValueError as e:
         return JSONResponse(_err(str(e)))
 
@@ -1457,7 +1471,7 @@ async def post_analyse_smart_ocr(
         result = await asyncio.to_thread(
             smart_ocr_run,
             tmp,
-            api_key,
+            api_keys,
             lang,
             answer_model,
             check_canon,

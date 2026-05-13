@@ -29,10 +29,13 @@ from __future__ import annotations
 import copy
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from google import genai
 from google.genai import types
+
+from src.gemini_copy_ocr import copy_ocr_parallel_workers
 
 from .config import (
     CONTENT_X_MAX,
@@ -79,7 +82,7 @@ _REM_Y_MAX_GRID = 46.0
 
 
 def mark_item(
-    api_key: str,
+    api_key: str | list[str],
     item: dict[str, Any],
     grid_pages_for_item: list[bytes],
     model_entry: dict[str, Any] | None,
@@ -91,7 +94,17 @@ def mark_item(
     language: str,
     request_id: str,
 ) -> dict[str, Any]:
-    """Run step 3 on a single item. Returns a new dict (input is not mutated)."""
+    """Run step 3 on a single item. Returns a new dict (input is not mutated).
+
+    ``api_key`` may be a single string or a list of keys. When a list is passed,
+    the per-page fallback round-robins across keys so concurrent calls hit
+    different projects.
+    """
+    api_keys: list[str] = (
+        [k for k in api_key if k] if isinstance(api_key, list) else [api_key]
+    )
+    if not api_keys:
+        raise ValueError("mark_item requires at least one API key.")
     out = copy.deepcopy(item)
     qid = out.get("question_id", "?")
     start_page = int(out.get("start_page", 1))
@@ -113,38 +126,30 @@ def mark_item(
         })
         return out
 
-    if model_entry is None:
+    has_model_entry = isinstance(model_entry, dict)
+    if not has_model_entry:
         log.warning(
-            "step3[%s] q=%s no matching model entry — emitting empty grading shell",
+            "step3[%s] q=%s no matching model entry — marking without grading cap",
             request_id, qid,
         )
-        out.update({
-            "max_marks": 0.0,
-            "marks_awarded": 0.0,
-            "status": "unattempted",
-            "feedback": "No model answer entry for this question.",
-            "student_answer_summary": "",
-            "anchor_marks": [],
-            "remarks": [],
-            "annotations": [],
-        })
-        return out
 
     # Long items: fall back to per-page calls (each call sees exactly one image so
     # grid-coordinate context is unambiguous).
     if page_span > STEP3_MULTI_PAGE_THRESHOLD:
         return _mark_item_per_page_fallback(
-            api_key, out, grid_pages_for_item, model_entry,
+            api_keys, out, grid_pages_for_item, model_entry,
             subject=subject, teacher_instructions=teacher_instructions,
             check_level=check_level, strictness_line=strictness_line,
             language=language, request_id=request_id,
+            has_model_entry=has_model_entry,
         )
 
     raw_response = _call_step3(
-        api_key=api_key, item=out, grid_pages_for_item=grid_pages_for_item,
+        api_key=api_keys[0], item=out, grid_pages_for_item=grid_pages_for_item,
         valid_pages=valid_pages, subject=subject,
         teacher_instructions=teacher_instructions, check_level=check_level,
         strictness_line=strictness_line, language=language, request_id=request_id,
+        has_model_entry=has_model_entry,
     )
     if raw_response is None:
         return _empty_grading_shell(out, model_entry)
@@ -161,10 +166,10 @@ def mark_item(
 
 
 def _mark_item_per_page_fallback(
-    api_key: str,
+    api_keys: list[str],
     item: dict[str, Any],
     grid_pages_for_item: list[bytes],
-    model_entry: dict[str, Any],
+    model_entry: dict[str, Any] | None,
     *,
     subject: str,
     teacher_instructions: str,
@@ -172,6 +177,7 @@ def _mark_item_per_page_fallback(
     strictness_line: str,
     language: str,
     request_id: str,
+    has_model_entry: bool = True,
 ) -> dict[str, Any]:
     """One Gemini call per page of the item; aggregate marks from the first page only."""
     qid = item.get("question_id", "?")
@@ -184,22 +190,67 @@ def _mark_item_per_page_fallback(
         request_id, qid, len(pages),
     )
 
+    def _one_page(offset: int, page: int) -> tuple[int, dict[str, Any] | None]:
+        single_image = grid_pages_for_item[offset:offset + 1]
+        primary_key = api_keys[offset % len(api_keys)]
+        raw = _call_step3(
+            api_key=primary_key, item=item, grid_pages_for_item=single_image,
+            valid_pages=[page], subject=subject,
+            teacher_instructions=teacher_instructions, check_level=check_level,
+            strictness_line=strictness_line, language=language, request_id=request_id,
+            has_model_entry=has_model_entry,
+        )
+        if raw is None:
+            log.warning(
+                "step3[%s] q=%s per-page fallback page=%s returned no response",
+                request_id, qid, page,
+            )
+            return page, None
+        validated = _validate_step3_response(raw, item=item, valid_pages=[page])
+        if not validated["anchor_grid_by_page"].get(page) and not validated["remark_grid_by_page"].get(page):
+            log.warning(
+                "step3[%s] q=%s per-page fallback page=%s empty anchors+remarks — retrying once",
+                request_id, qid, page,
+            )
+            # Retry on a DIFFERENT key when more than one is configured —
+            # rules out transient per-key quota / rate hiccups.
+            retry_key = api_keys[(offset + 1) % len(api_keys)]
+            raw_retry = _call_step3(
+                api_key=retry_key, item=item, grid_pages_for_item=single_image,
+                valid_pages=[page], subject=subject,
+                teacher_instructions=teacher_instructions, check_level=check_level,
+                strictness_line=strictness_line, language=language, request_id=request_id,
+                has_model_entry=has_model_entry,
+            )
+            if raw_retry is not None:
+                retry_val = _validate_step3_response(raw_retry, item=item, valid_pages=[page])
+                if retry_val["anchor_grid_by_page"].get(page) or retry_val["remark_grid_by_page"].get(page):
+                    validated = retry_val
+        return page, validated
+
+    workers = max(1, min(copy_ocr_parallel_workers(), len(pages)))
+    results_by_page: dict[int, dict[str, Any] | None] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_one_page, offset, page): page for offset, page in enumerate(pages)}
+        for fut in futs:
+            try:
+                page_done, validated = fut.result()
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "step3[%s] q=%s per-page worker raised: %s",
+                    request_id, qid, e,
+                )
+                continue
+            results_by_page[page_done] = validated
+
     aggregate_marks: dict[str, Any] | None = None
     all_anchor_grid: list[dict[str, Any]] = []
     all_remark_grid: list[dict[str, Any]] = []
     all_annotations: list[dict[str, Any]] = []
-
-    for offset, page in enumerate(pages):
-        single_image = grid_pages_for_item[offset:offset + 1]
-        raw = _call_step3(
-            api_key=api_key, item=item, grid_pages_for_item=single_image,
-            valid_pages=[page], subject=subject,
-            teacher_instructions=teacher_instructions, check_level=check_level,
-            strictness_line=strictness_line, language=language, request_id=request_id,
-        )
-        if raw is None:
+    for page in pages:
+        validated = results_by_page.get(page)
+        if validated is None:
             continue
-        validated = _validate_step3_response(raw, item=item, valid_pages=[page])
         if aggregate_marks is None:
             aggregate_marks = {
                 "marks_awarded": validated["marks_awarded"],
@@ -248,6 +299,7 @@ def _call_step3(
     strictness_line: str,
     language: str,
     request_id: str,
+    has_model_entry: bool = True,
 ) -> dict[str, Any] | None:
     if len(grid_pages_for_item) != len(valid_pages):
         log.warning(
@@ -263,6 +315,7 @@ def _call_step3(
         teacher_instructions=teacher_instructions, item=item,
         valid_pages=valid_pages, check_level=check_level,
         strictness_line=strictness_line,
+        has_model_entry=has_model_entry,
     )
     parts: list[Any] = [types.Part.from_text(text=prompt)]
     for p, png in zip(valid_pages, grid_pages_for_item):
