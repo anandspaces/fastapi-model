@@ -49,7 +49,8 @@ from src.free_space_service import (
     snap_items_annotations,
 )
 from src.pdf_qa_pipeline import run_pdf_questions_and_answers
-from src.database import UPLOADS_DIR, init_db
+from src.db import engine  # eager import: fails fast if DATABASE_URL is bad
+from src.storage import UPLOADS_DIR
 from src.service import (
     BOOKLET_TYPES,
     _normalize_booklet_type,
@@ -107,7 +108,12 @@ async def lifespan(_app: FastAPI):
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    init_db()
+    # Schema is managed by Alembic: run `alembic upgrade head` before serving.
+    # The eager `from src.db import engine` import at module top already validated
+    # DATABASE_URL; this log line just makes the active DB visible at startup.
+    logging.getLogger(__name__).info(
+        "database engine ready: %s", engine.url.render_as_string(hide_password=True)
+    )
     yield
 
 

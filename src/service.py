@@ -1,11 +1,21 @@
-"""SQLite persistence service for model keys and answer booklets."""
+"""Persistence service for model keys, answer booklets, users.
+
+All persistence goes through SQLAlchemy ORM sessions (see :mod:`src.db`).
+Function signatures and return shapes are preserved verbatim from the prior
+SQLite implementation so call sites in :mod:`main` need no changes beyond
+import.
+"""
+
+from __future__ import annotations
 
 import json
 import re
 import time
 import uuid
 
-from src.database import get_conn
+from sqlalchemy import case, func
+
+from src.db import AnswerModel, KeyUpload, User, get_session
 
 _Q_ENG_ID = re.compile(r"^q-eng-(\d+)$", re.I)
 
@@ -26,9 +36,18 @@ def _questions_with_instruction_name_defaults(questions: list) -> list:
     return out
 
 
-def _normalize_booklet_type(raw: str) -> str:
+def _normalize_booklet_type(raw: str | None) -> str:
     t = (raw or "standard").strip().lower()
     return t if t in BOOKLET_TYPES else "standard"
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ---------------------------------------------------------------------------
+# key_uploads
+# ---------------------------------------------------------------------------
 
 
 def insert_key_upload(
@@ -39,33 +58,35 @@ def insert_key_upload(
     owner_user_id: str,
     booklet_type: str = "standard",
 ) -> None:
-    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    bt = _normalize_booklet_type(booklet_type)
-    with get_conn() as db:
-        db.execute(
-            """INSERT INTO key_uploads
-            (id, title, lang, pdf_path, created_at, owner_user_id, booklet_type)
-            VALUES (?,?,?,?,?,?,?)""",
-            (key_id, title, lang, pdf_path, created, owner_user_id, bt),
+    with get_session() as db:
+        db.add(
+            KeyUpload(
+                id=key_id,
+                title=title,
+                lang=lang,
+                pdf_path=pdf_path,
+                created_at=_now_iso(),
+                owner_user_id=owner_user_id,
+                booklet_type=_normalize_booklet_type(booklet_type),
+            )
         )
-        db.commit()
 
 
 def get_key_upload(key_id: str, owner_user_id: str) -> dict | None:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT * FROM key_uploads WHERE id = ? AND owner_user_id = ?",
-            (key_id, owner_user_id),
-        ).fetchone()
-    if not row:
+    with get_session() as db:
+        row = (
+            db.query(KeyUpload)
+            .filter_by(id=key_id, owner_user_id=owner_user_id)
+            .first()
+        )
+    if row is None:
         return None
-    rdict = dict(row)
     return {
-        "id": row["id"],
-        "title": row["title"],
-        "lang": row["lang"],
-        "pdf_path": row["pdf_path"],
-        "booklet_type": rdict.get("booklet_type") or "standard",
+        "id": row.id,
+        "title": row.title,
+        "lang": row.lang,
+        "pdf_path": row.pdf_path,
+        "booklet_type": row.booklet_type or "standard",
     }
 
 
@@ -77,30 +98,28 @@ def update_key_upload(
     booklet_type: str | None = None,
 ) -> tuple[bool, str | None]:
     """Update title/lang (and optionally booklet_type) in key_uploads and answer_models if present."""
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT booklet_type FROM key_uploads WHERE id = ? AND owner_user_id = ?",
-            (key_id, owner_user_id),
-        ).fetchone()
-        if not row:
+    with get_session() as db:
+        row = (
+            db.query(KeyUpload)
+            .filter_by(id=key_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
             return False, "Model key not found"
 
         bt = (
             _normalize_booklet_type(booklet_type)
             if booklet_type is not None
-            else (dict(row).get("booklet_type") or "standard")
+            else (row.booklet_type or "standard")
         )
 
-        db.execute(
-            "UPDATE key_uploads SET title = ?, lang = ?, booklet_type = ? WHERE id = ? AND owner_user_id = ?",
-            (title, lang, bt, key_id, owner_user_id),
-        )
-        db.execute(
-            """UPDATE answer_models SET title = ?, lang = ?, booklet_type = ?
-               WHERE id = ? AND owner_user_id = ?""",
-            (title, lang, bt, key_id, owner_user_id),
-        )
-        db.commit()
+        row.title = title
+        row.lang = lang
+        row.booklet_type = bt
+
+        db.query(AnswerModel).filter_by(
+            id=key_id, owner_user_id=owner_user_id
+        ).update({"title": title, "lang": lang, "booklet_type": bt})
     return True, None
 
 
@@ -109,32 +128,37 @@ def delete_model_key(
 ) -> tuple[bool, str | None, str | None]:
     """Delete key_upload and linked answer_model row by id.
 
-    Returns (deleted, key_pdf_path, booklet_pdf_path).
+    Returns ``(deleted, key_pdf_path, booklet_pdf_path)``.
     """
-    with get_conn() as db:
-        key_row = db.execute(
-            "SELECT pdf_path FROM key_uploads WHERE id = ? AND owner_user_id = ?",
-            (key_id, owner_user_id),
-        ).fetchone()
-        if not key_row:
+    with get_session() as db:
+        key_row = (
+            db.query(KeyUpload)
+            .filter_by(id=key_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if key_row is None:
             return False, None, None
+        key_pdf_path = key_row.pdf_path
 
-        answer_row = db.execute(
-            "SELECT booklet_pdf_path FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (key_id, owner_user_id),
-        ).fetchone()
-        booklet_path = answer_row["booklet_pdf_path"] if answer_row else None
+        answer_row = (
+            db.query(AnswerModel)
+            .filter_by(id=key_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        booklet_path = answer_row.booklet_pdf_path if answer_row else None
 
-        db.execute(
-            "DELETE FROM key_uploads WHERE id = ? AND owner_user_id = ?",
-            (key_id, owner_user_id),
-        )
-        db.execute(
-            "DELETE FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (key_id, owner_user_id),
-        )
-        db.commit()
-    return True, key_row["pdf_path"], booklet_path
+        db.query(KeyUpload).filter_by(
+            id=key_id, owner_user_id=owner_user_id
+        ).delete()
+        db.query(AnswerModel).filter_by(
+            id=key_id, owner_user_id=owner_user_id
+        ).delete()
+    return True, key_pdf_path, booklet_path
+
+
+# ---------------------------------------------------------------------------
+# answer_models
+# ---------------------------------------------------------------------------
 
 
 def insert_answer_model(
@@ -146,18 +170,20 @@ def insert_answer_model(
     owner_user_id: str,
     booklet_type: str = "standard",
 ) -> None:
-    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    qjson = json.dumps(questions, ensure_ascii=False)
-    n = len(questions)
-    bt = _normalize_booklet_type(booklet_type)
-    with get_conn() as db:
-        db.execute(
-            """INSERT INTO answer_models
-            (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id, booklet_type)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
-            (model_id, title, lang, qjson, n, booklet_pdf_path, created, owner_user_id, bt),
+    with get_session() as db:
+        db.add(
+            AnswerModel(
+                id=model_id,
+                title=title,
+                lang=lang,
+                questions_json=json.dumps(questions, ensure_ascii=False),
+                question_count=len(questions),
+                booklet_pdf_path=booklet_pdf_path,
+                created_at=_now_iso(),
+                owner_user_id=owner_user_id,
+                booklet_type=_normalize_booklet_type(booklet_type),
+            )
         )
-        db.commit()
 
 
 def upsert_answer_model_from_booklet(
@@ -169,55 +195,66 @@ def upsert_answer_model_from_booklet(
     owner_user_id: str,
     booklet_type: str = "standard",
 ) -> None:
-    """Insert or update answer_models after PDF booklet processing (replaces questions if row exists)."""
-    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    """Insert or update answer_models after PDF booklet processing.
+
+    Replaces ``questions_json`` if the row already exists.
+    """
     qjson = json.dumps(questions, ensure_ascii=False)
     n = len(questions)
     bt = _normalize_booklet_type(booklet_type)
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT id FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if row:
-            db.execute(
-                """UPDATE answer_models SET title = ?, lang = ?, questions_json = ?, question_count = ?,
-                   booklet_pdf_path = ?, booklet_type = ? WHERE id = ? AND owner_user_id = ?""",
-                (title, lang, qjson, n, booklet_pdf_path, bt, model_id, owner_user_id),
-            )
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is not None:
+            row.title = title
+            row.lang = lang
+            row.questions_json = qjson
+            row.question_count = n
+            row.booklet_pdf_path = booklet_pdf_path
+            row.booklet_type = bt
         else:
-            db.execute(
-                """INSERT INTO answer_models
-                (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id, booklet_type)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
-                (model_id, title, lang, qjson, n, booklet_pdf_path, created, owner_user_id, bt),
+            db.add(
+                AnswerModel(
+                    id=model_id,
+                    title=title,
+                    lang=lang,
+                    questions_json=qjson,
+                    question_count=n,
+                    booklet_pdf_path=booklet_pdf_path,
+                    created_at=_now_iso(),
+                    owner_user_id=owner_user_id,
+                    booklet_type=bt,
+                )
             )
-        db.commit()
 
 
 def get_answer_model(model_id: str, owner_user_id: str) -> dict | None:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT * FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-    if not row:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+    if row is None:
         return None
-    questions = json.loads(row["questions_json"])
+    try:
+        questions = json.loads(row.questions_json)
+    except Exception:
+        questions = []
     if isinstance(questions, list):
         questions = _questions_with_instruction_name_defaults(questions)
-    rdict = dict(row)
-    booklet_type = rdict.get("booklet_type") or "standard"
-    intro_page = int(rdict.get("intro_page") or 2)
     return {
-        "id": row["id"],
-        "title": row["title"],
-        "lang": row["lang"],
-        "question_count": row["question_count"],
+        "id": row.id,
+        "title": row.title,
+        "lang": row.lang,
+        "question_count": row.question_count,
         "questions": questions,
-        "created_at": row["created_at"],
-        "booklet_type": str(booklet_type),
-        "intro_page": intro_page,
+        "created_at": row.created_at,
+        "booklet_type": str(row.booklet_type or "standard"),
+        "intro_page": int(row.intro_page or 2),
     }
 
 
@@ -238,56 +275,58 @@ def get_question_for_owner(
 
 
 def list_registered_models(owner_user_id: str) -> list[dict]:
-    """Every id from POST /models/key (key_uploads), with title/lang.
-
-    Includes rows before answer booklet is posted. ``has_booklet`` is True once
-    that id exists in answer_models.
-    """
-    with get_conn() as db:
-        rows = db.execute(
-            """
-            SELECT k.id, k.title, k.lang,
-                   CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS has_booklet,
-                   COALESCE(a.booklet_type, k.booklet_type) AS booklet_type
-            FROM key_uploads k
-            LEFT JOIN answer_models a
-              ON a.id = k.id AND a.owner_user_id = k.owner_user_id
-            WHERE k.owner_user_id = ?
-            ORDER BY k.created_at DESC
-            """
-            ,
-            (owner_user_id,),
-        ).fetchall()
-    out: list[dict] = []
-    for r in rows:
-        bt = r["booklet_type"] if r["booklet_type"] is not None else None
-        out.append(
-            {
-                "id": r["id"],
-                "title": r["title"],
-                "lang": r["lang"],
-                "has_booklet": bool(r["has_booklet"]),
-                "booklet_type": bt,
-            }
+    """Every id from POST /models/key, joined LEFT with answer_models for has_booklet."""
+    with get_session() as db:
+        rows = (
+            db.query(
+                KeyUpload.id,
+                KeyUpload.title,
+                KeyUpload.lang,
+                case((AnswerModel.id.is_not(None), 1), else_=0).label("has_booklet"),
+                func.coalesce(AnswerModel.booklet_type, KeyUpload.booklet_type).label(
+                    "booklet_type"
+                ),
+            )
+            .outerjoin(
+                AnswerModel,
+                (AnswerModel.id == KeyUpload.id)
+                & (AnswerModel.owner_user_id == KeyUpload.owner_user_id),
+            )
+            .filter(KeyUpload.owner_user_id == owner_user_id)
+            .order_by(KeyUpload.created_at.desc())
+            .all()
         )
-    return out
+    return [
+        {
+            "id": r.id,
+            "title": r.title,
+            "lang": r.lang,
+            "has_booklet": bool(r.has_booklet),
+            "booklet_type": r.booklet_type,
+        }
+        for r in rows
+    ]
 
 
-def delete_answer_model(model_id: str, owner_user_id: str) -> tuple[bool, str | None]:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT booklet_pdf_path FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if not row:
+def delete_answer_model(
+    model_id: str, owner_user_id: str
+) -> tuple[bool, str | None]:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
             return False, None
-        path = row["booklet_pdf_path"]
-        db.execute(
-            "DELETE FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        )
-        db.commit()
+        path = row.booklet_pdf_path
+        db.delete(row)
     return True, path
+
+
+# ---------------------------------------------------------------------------
+# questions inside answer_models (denormalized JSON column)
+# ---------------------------------------------------------------------------
 
 
 def _next_q_eng_id(questions: list) -> str:
@@ -311,22 +350,23 @@ def add_answer_model_question(
 ) -> tuple[bool, str | None, str | None, int | None]:
     """Append one question; assign next q-eng-NNN id; renumber questionNo to Q1..Qn.
 
-    If no answer_models row exists yet but the model key exists (key_uploads), creates answer_models
-    with this question and no booklet PDF (booklet can be uploaded later via POST /models/answer-booklet).
-
-    Returns (ok, error, new_question_id, question_count).
+    If no answer_models row exists yet but the key_uploads row does, create the
+    answer_models row with this single question and no booklet PDF.
+    Returns ``(ok, error, new_question_id, question_count)``.
     """
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT questions_json, intro_page FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if not row:
-            key_row = db.execute(
-                "SELECT title, lang, booklet_type FROM key_uploads WHERE id = ? AND owner_user_id = ?",
-                (model_id, owner_user_id),
-            ).fetchone()
-            if not key_row:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
+            key_row = (
+                db.query(KeyUpload)
+                .filter_by(id=model_id, owner_user_id=owner_user_id)
+                .first()
+            )
+            if key_row is None:
                 return False, "Model key not found for this user.", None, None
 
             questions: list = []
@@ -337,30 +377,23 @@ def add_answer_model_question(
                 if isinstance(q, dict):
                     q["questionNo"] = f"Q{i}"
 
-            qjson = json.dumps(questions, ensure_ascii=False)
-            created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            bt = _normalize_booklet_type(dict(key_row).get("booklet_type"))
-            db.execute(
-                """INSERT INTO answer_models
-                (id, title, lang, questions_json, question_count, booklet_pdf_path, created_at, owner_user_id, booklet_type)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    model_id,
-                    key_row["title"],
-                    key_row["lang"],
-                    qjson,
-                    1,
-                    None,
-                    created,
-                    owner_user_id,
-                    bt,
-                ),
+            db.add(
+                AnswerModel(
+                    id=model_id,
+                    title=key_row.title,
+                    lang=key_row.lang,
+                    questions_json=json.dumps(questions, ensure_ascii=False),
+                    question_count=1,
+                    booklet_pdf_path=None,
+                    created_at=_now_iso(),
+                    owner_user_id=owner_user_id,
+                    booklet_type=_normalize_booklet_type(key_row.booklet_type),
+                )
             )
-            db.commit()
             return True, None, new_id, 1
 
         try:
-            questions = json.loads(row["questions_json"])
+            questions = json.loads(row.questions_json)
         except Exception:
             return False, "Invalid questions_json", None, None
 
@@ -375,28 +408,25 @@ def add_answer_model_question(
             if isinstance(q, dict):
                 q["questionNo"] = f"Q{i}"
 
-        qjson = json.dumps(questions, ensure_ascii=False)
-        db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
-            (qjson, len(questions), model_id, owner_user_id),
-        )
-        db.commit()
+        row.questions_json = json.dumps(questions, ensure_ascii=False)
+        row.question_count = len(questions)
     return True, None, new_id, len(questions)
 
 
 def update_answer_model_question(
     model_id: str, question_id: str, new_question: dict, owner_user_id: str
 ) -> tuple[bool, str | None]:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if not row:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
             return False, "Model not found"
 
         try:
-            questions = json.loads(row["questions_json"])
+            questions = json.loads(row.questions_json)
         except Exception:
             return False, "Invalid questions_json"
 
@@ -416,12 +446,8 @@ def update_answer_model_question(
         new_obj["id"] = question_id
         questions[idx] = new_obj
 
-        qjson = json.dumps(questions, ensure_ascii=False)
-        db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
-            (qjson, len(questions), model_id, owner_user_id),
-        )
-        db.commit()
+        row.questions_json = json.dumps(questions, ensure_ascii=False)
+        row.question_count = len(questions)
     return True, None
 
 
@@ -431,32 +457,29 @@ def bulk_patch_answer_model_question_page_marks(
     items: list[tuple[str, int, int]],
     intro_page: int | None = None,
 ) -> tuple[bool, str | None, list[str], list[str], int]:
-    """Apply pageNum/marks for many question ids. Unknown ids skipped (reported in not_found).
+    """Apply pageNum/marks for many question ids. Unknown ids reported in not_found.
 
     Duplicate question_ids in *items*: last occurrence wins. Returns
-    (ok, error, updated_question_ids, not_found_question_ids).
+    ``(ok, error, updated_question_ids, not_found_question_ids, intro_page)``.
     """
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT questions_json, intro_page FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if not row:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
             return False, "Model not found", [], [], 2
 
         if not items:
-            current_intro = int((dict(row).get("intro_page") or 2))
+            current_intro = int(row.intro_page or 2)
             if intro_page is not None:
                 current_intro = int(intro_page)
-                db.execute(
-                    "UPDATE answer_models SET intro_page = ? WHERE id = ? AND owner_user_id = ?",
-                    (current_intro, model_id, owner_user_id),
-                )
-                db.commit()
+                row.intro_page = current_intro
             return True, None, [], [], current_intro
 
         try:
-            questions = json.loads(row["questions_json"])
+            questions = json.loads(row.questions_json)
         except Exception:
             return False, "Invalid questions_json", [], [], 2
 
@@ -489,31 +512,30 @@ def bulk_patch_answer_model_question_page_marks(
                 seen_updated.add(qid)
                 updated_order.append(qid)
 
-        qjson = json.dumps(questions, ensure_ascii=False)
-        next_intro_page = int((dict(row).get("intro_page") or 2))
+        next_intro_page = int(row.intro_page or 2)
         if intro_page is not None:
             next_intro_page = int(intro_page)
-        db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ?, intro_page = ? WHERE id = ? AND owner_user_id = ?",
-            (qjson, len(questions), next_intro_page, model_id, owner_user_id),
-        )
-        db.commit()
+
+        row.questions_json = json.dumps(questions, ensure_ascii=False)
+        row.question_count = len(questions)
+        row.intro_page = next_intro_page
     return True, None, updated_order, not_found_order, next_intro_page
 
 
 def reorder_answer_model_questions(
     model_id: str, owner_user_id: str, order: list[str]
 ) -> tuple[bool, str | None, list[dict] | None]:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if not row:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
             return False, "Model not found.", None
 
         try:
-            questions = json.loads(row["questions_json"])
+            questions = json.loads(row.questions_json)
         except Exception:
             return False, "Invalid questions_json.", None
 
@@ -521,7 +543,9 @@ def reorder_answer_model_questions(
             return False, "Invalid questions_json.", None
 
         ids = [q.get("id") for q in questions if isinstance(q, dict)]
-        if len(ids) != len(questions) or any(not isinstance(i, str) or not i.strip() for i in ids):
+        if len(ids) != len(questions) or any(
+            not isinstance(i, str) or not i.strip() for i in ids
+        ):
             return False, "Invalid questions_json.", None
 
         if len(set(order)) != len(order):
@@ -542,28 +566,25 @@ def reorder_answer_model_questions(
         for i, q in enumerate(arranged, 1):
             q["questionNo"] = f"Q{i}"
 
-        qjson = json.dumps(arranged, ensure_ascii=False)
-        db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
-            (qjson, len(arranged), model_id, owner_user_id),
-        )
-        db.commit()
+        row.questions_json = json.dumps(arranged, ensure_ascii=False)
+        row.question_count = len(arranged)
     return True, None, arranged
 
 
 def delete_answer_model_question(
     model_id: str, question_id: str, owner_user_id: str
 ) -> tuple[bool, str | None, list[dict] | None]:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT questions_json FROM answer_models WHERE id = ? AND owner_user_id = ?",
-            (model_id, owner_user_id),
-        ).fetchone()
-        if not row:
+    with get_session() as db:
+        row = (
+            db.query(AnswerModel)
+            .filter_by(id=model_id, owner_user_id=owner_user_id)
+            .first()
+        )
+        if row is None:
             return False, "Model not found.", None
 
         try:
-            questions = json.loads(row["questions_json"])
+            questions = json.loads(row.questions_json)
         except Exception:
             return False, "Invalid questions_json.", None
 
@@ -583,43 +604,41 @@ def delete_answer_model_question(
         for i, q in enumerate(questions, 1):
             q["questionNo"] = f"Q{i}"
 
-        qjson = json.dumps(questions, ensure_ascii=False)
-        db.execute(
-            "UPDATE answer_models SET questions_json = ?, question_count = ? WHERE id = ? AND owner_user_id = ?",
-            (qjson, len(questions), model_id, owner_user_id),
-        )
-        db.commit()
+        row.questions_json = json.dumps(questions, ensure_ascii=False)
+        row.question_count = len(questions)
     return True, None, questions
+
+
+# ---------------------------------------------------------------------------
+# users
+# ---------------------------------------------------------------------------
 
 
 def create_user(username: str, password_hash: str) -> tuple[bool, str | None]:
     user_id = str(uuid.uuid4())
-    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with get_conn() as db:
-        existing = db.execute(
-            "SELECT 1 FROM users WHERE username = ?", (username,)
-        ).fetchone()
-        if existing:
+    with get_session() as db:
+        existing = db.query(User).filter_by(username=username).first()
+        if existing is not None:
             return False, "Username already exists"
-        db.execute(
-            "INSERT INTO users (id, username, password_hash, created_at) VALUES (?,?,?,?)",
-            (user_id, username, password_hash, created),
+        db.add(
+            User(
+                id=user_id,
+                username=username,
+                password_hash=password_hash,
+                created_at=_now_iso(),
+            )
         )
-        db.commit()
     return True, None
 
 
 def get_user_by_username(username: str) -> dict | None:
-    with get_conn() as db:
-        row = db.execute(
-            "SELECT id, username, password_hash, created_at FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
-    if not row:
+    with get_session() as db:
+        row = db.query(User).filter_by(username=username).first()
+    if row is None:
         return None
     return {
-        "id": row["id"],
-        "username": row["username"],
-        "password_hash": row["password_hash"],
-        "created_at": row["created_at"],
+        "id": row.id,
+        "username": row.username,
+        "password_hash": row.password_hash,
+        "created_at": row.created_at,
     }
